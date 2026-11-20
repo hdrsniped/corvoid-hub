@@ -44,7 +44,7 @@ The app is optional. Everything it does is a plain file edit, so any AI agent ca
 
 ## Install
 
-1. Download `Corvoid Hub_1.0.0_x64-setup.exe` from [Releases](https://github.com/hdrsniped/corvoid-hub/releases) and run it.
+1. Download the `x64-setup.exe` installer from [Releases](https://github.com/hdrsniped/corvoid-hub/releases) and run it.
 2. On first launch the app opens **Setup**: point it at your hub folder and Obsidian vault, either by pasting one prompt into Claude Code, Antigravity or OpenCode (the agent does the rest), or by filling in the paths yourself. With no config at all it falls back to `%USERPROFILE%\ai-hub` and `%USERPROFILE%\Documents\Vortex` (see [Configure](#configure)).
 3. Setup can also connect the hub's `AGENTS.md` to your harnesses, so they all follow the same rules: a line in `~/.claude/CLAUDE.md`, an `instructions` entry in OpenCode's config, or a small plugin folder for Antigravity. Every file it edits is backed up next to itself first (`CLAUDE.md.bak-20261120-101500`), and nothing is overwritten twice.
 
