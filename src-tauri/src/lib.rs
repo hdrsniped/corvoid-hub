@@ -1,14 +1,17 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
-use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::path::BaseDirectory;
 use tauri::webview::PageLoadEvent;
+use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 
@@ -26,10 +29,10 @@ struct ConfigFile {
     hub: Option<String>,
     /// Root of the Vortex vault. Default: %USERPROFILE%\Documents\Vortex.
     vault: Option<String>,
-    /// vlog.ps1. Quick log is off when it is missing.
-    vlog: Option<String>,
-    /// needle-log.ps1 (quick log suggestions). Quick log is off when it is missing.
-    needle_log: Option<String>,
+    /// Python of the Needle add-on (its own venv). Optional: without it, no plain-language commands.
+    needle_python: Option<String>,
+    /// needle3.cact weights of the Needle add-on.
+    needle_weights: Option<String>,
     /// Log folder of the app itself. Default: <hub>\.logs.
     log_dir: Option<String>,
     /// Claude Code skill folder. Default: %USERPROFILE%\.claude\skills.
@@ -65,8 +68,10 @@ struct Config {
     auto_backup: String,
     /// Backups kept before the oldest are pruned.
     keep_backups: usize,
-    vlog: Option<PathBuf>,
-    needle_log: Option<PathBuf>,
+    /// Python (venv) of the Needle add-on.
+    needle_python: Option<PathBuf>,
+    /// needle3.cact weights of the Needle add-on.
+    needle_weights: Option<PathBuf>,
     /// The config file that was used, or "defaults".
     source: String,
     /// The config file on disk, whether or not it could be read (None when there is no file).
@@ -97,8 +102,9 @@ impl Config {
     fn apply_locks(&self) -> PathBuf {
         self.hub.join("bin").join("apply-locks.ps1")
     }
-    fn quick_log(&self) -> bool {
-        self.vlog.is_some() && self.needle_log.is_some()
+    /// True when both Needle paths are set (the files themselves are checked by needle_status).
+    fn needle_configured(&self) -> bool {
+        self.needle_python.is_some() && self.needle_weights.is_some()
     }
     /// True when a corvoid-hub.json was found (anything but the built-in defaults).
     fn configured(&self) -> bool {
@@ -266,8 +272,8 @@ fn load_config() -> Config {
         backup_dir,
         auto_backup,
         keep_backups,
-        vlog: take(file.vlog),
-        needle_log: take(file.needle_log),
+        needle_python: take(file.needle_python),
+        needle_weights: take(file.needle_weights),
         source,
         file_path,
         file_mtime,
@@ -356,14 +362,16 @@ pub struct ConfigView {
     auto_backup: String,
     /// How many backups are kept.
     keep_backups: usize,
-    vlog: Option<String>,
-    needle_log: Option<String>,
+    /// Python of the Needle add-on (`needlePython`).
+    needle_python: Option<String>,
+    /// needle3.cact of the Needle add-on (`needleWeights`).
+    needle_weights: Option<String>,
     /// The config file that was read, or "defaults".
     source: String,
     /// True when a config file was found (setup is done).
     configured: bool,
-    /// True when both vlog and needle-log are configured.
-    quick_log: bool,
+    /// True when both Needle keys are set (the files are checked by needle_status).
+    needle_configured: bool,
     hub_exists: bool,
     vault_exists: bool,
 }
@@ -392,11 +400,11 @@ fn get_config() -> ConfigView {
         backup_dir: path_text(&c.backup_dir),
         auto_backup: c.auto_backup.clone(),
         keep_backups: c.keep_backups,
-        vlog: c.vlog.as_deref().map(path_text),
-        needle_log: c.needle_log.as_deref().map(path_text),
+        needle_python: c.needle_python.as_deref().map(path_text),
+        needle_weights: c.needle_weights.as_deref().map(path_text),
         source: c.source.clone(),
         configured: c.configured(),
-        quick_log: c.quick_log(),
+        needle_configured: c.needle_configured(),
         hub_exists: c.hub.is_dir(),
         vault_exists: c.vault.is_dir(),
     }
@@ -892,39 +900,334 @@ fn output_text(out: &std::process::Output) -> String {
     .to_string()
 }
 
-/// stdout, stderr and the exit code of a script. Quick log reads its own exit codes (0/3/4).
-#[derive(Serialize)]
-pub struct ProcessRun {
-    stdout: String,
-    stderr: String,
-    code: i32,
+// ---------------------------------------------------------------------------------------------
+// Needle add-on: one lazy, long-running Python sidecar (addons/needle/needle_serve.py). It turns a
+// sentence into tool calls offline. Everything it returns is a preview; the UI confirms writes.
+// ---------------------------------------------------------------------------------------------
+
+/// How long one request may take before the worker is restarted.
+const NEEDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The running worker. Only one; requests are serialized by the lock.
+struct NeedleSidecar {
+    child: Child,
+    stdin: ChildStdin,
+    /// JSON lines the reader thread takes off the worker's stdout.
+    lines: Receiver<String>,
+    next_id: u64,
 }
 
-/// Asks needle-log for a suggestion (it runs with -DryRun, so nothing is written).
-#[tauri::command]
-async fn quicklog_suggest(sentence: String) -> Result<ProcessRun, String> {
-    let text = sentence.trim().to_string();
-    if text.is_empty() {
-        return Err("say what you did first".into());
+static NEEDLE: Mutex<Option<NeedleSidecar>> = Mutex::new(None);
+/// The last failure, so needle_status can explain why commands do not work.
+static NEEDLE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// The add-on's script: bundled next to the app (tauri.conf `bundle.resources`), or the repo copy
+/// in a dev build.
+fn needle_script_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let bundled = app
+        .path()
+        .resolve("addons/needle/needle_serve.py", BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_file());
+    bundled.or_else(|| {
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("addons")
+            .join("needle")
+            .join("needle_serve.py");
+        dev.is_file().then_some(dev)
+    })
+}
+
+fn set_needle_error(message: Option<String>) {
+    if let Ok(mut guard) = NEEDLE_ERROR.lock() {
+        *guard = message;
     }
-    let script = config()
-        .needle_log
+}
+
+fn needle_error() -> Option<String> {
+    NEEDLE_ERROR.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// True when the worker process is still alive. Never waits for a request in flight.
+fn needle_running() -> bool {
+    match NEEDLE.try_lock() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(proc) => matches!(proc.child.try_wait(), Ok(None)),
+            None => false,
+        },
+        // A locked worker is answering a request right now, so it is running.
+        Err(std::sync::TryLockError::WouldBlock) => true,
+        Err(std::sync::TryLockError::Poisoned(_)) => false,
+    }
+}
+
+/// Stops the worker. The next request starts a fresh one.
+fn needle_kill() {
+    if let Ok(mut guard) = NEEDLE.lock() {
+        if let Some(mut proc) = guard.take() {
+            let _ = proc.child.kill();
+            let _ = proc.child.wait();
+        }
+    }
+}
+
+/// Starts the worker: the configured Python, our script, no console window, no network use.
+fn needle_spawn(app: &tauri::AppHandle) -> Result<NeedleSidecar, String> {
+    // A config an agent just wrote is used on the next command, without a restart.
+    refresh_if_changed();
+    let c = config();
+    let python = c
+        .needle_python
         .clone()
-        .ok_or("quick log is off: set \"vlog\" and \"needleLog\" in corvoid-hub.json")?;
+        .ok_or("Needle is not set up: set \"needlePython\" in corvoid-hub.json")?;
+    let weights = c
+        .needle_weights
+        .clone()
+        .ok_or("Needle is not set up: set \"needleWeights\" in corvoid-hub.json")?;
+    if !python.is_file() {
+        return Err(format!("Needle Python not found: {}", python.display()));
+    }
+    if !weights.is_file() {
+        return Err(format!("Needle weights not found: {}", weights.display()));
+    }
+    let script = needle_script_path(app).ok_or(
+        "needle_serve.py is missing (reinstall the app, or keep addons/needle in a dev build)",
+    )?;
+
+    let mut cmd = Command::new(&python);
+    cmd.arg("-I")
+        .arg(&script)
+        .arg("--weights")
+        .arg(&weights)
+        // The sidecar script also sets these; both mean an offline run and no telemetry.
+        .env("CACTUS_TELEMETRY", "0")
+        .env("HF_HUB_OFFLINE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // Model warnings must never fill a pipe nobody reads, and the app has no console.
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot start Needle: {e}"))?;
+    let stdin = child.stdin.take().ok_or("Needle stdin is not open")?;
+    let stdout = child.stdout.take().ok_or("Needle stdout is not open")?;
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(text) => {
+                    if sender.send(text).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(NeedleSidecar {
+        child,
+        stdin,
+        lines,
+        next_id: 1,
+    })
+}
+
+/// One request, keeping the worker for the next one. Callers hold no lock while they wait.
+fn needle_ask_blocking(
+    app: &tauri::AppHandle,
+    text: &str,
+    tools: &[serde_json::Value],
+) -> Result<NeedleResult, String> {
+    let mut guard = NEEDLE
+        .lock()
+        .map_err(|_| "the Needle worker is locked".to_string())?;
+    let dead = match guard.as_mut() {
+        None => true,
+        Some(proc) => !matches!(proc.child.try_wait(), Ok(None)),
+    };
+    if dead {
+        *guard = None;
+        *guard = Some(needle_spawn(app)?);
+    }
+    let proc = guard.as_mut().ok_or("the Needle worker did not start")?;
+
+    let id = proc.next_id;
+    proc.next_id += 1;
+    let payload = serde_json::json!({ "id": id, "text": text, "tools": tools });
+    let line = format!("{payload}\n");
+    proc.stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| proc.stdin.flush())
+        .map_err(|e| format!("cannot talk to Needle: {e}"))?;
+
+    let deadline = Instant::now() + NEEDLE_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err("Needle did not answer within 15 s".into());
+        }
+        match proc.lines.recv_timeout(left) {
+            Ok(line) => {
+                // A late answer to an earlier request is skipped, not mistaken for this one.
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
+                    continue;
+                }
+                if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+                    return Err(error.to_string());
+                }
+                return serde_json::from_value(value)
+                    .map_err(|e| format!("unreadable Needle answer: {e}"));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err("Needle did not answer within 15 s".into());
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("Needle stopped (the worker exited)".into());
+            }
+        }
+    }
+}
+
+/// One answer of the sidecar: the calls it is sure about and the ones it held back.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeedleResult {
+    /// `{name, arguments}` of each confident call.
+    #[serde(default)]
+    calls: Vec<serde_json::Value>,
+    /// Low-confidence suggestions, shown as "Did you mean…" and still confirmed.
+    #[serde(default)]
+    held: Vec<serde_json::Value>,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    ms: u64,
+}
+
+/// What the Add-ons tab and Ctrl+K show about the add-on.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeedleStatus {
+    /// Both config keys are set.
+    configured: bool,
+    python_found: bool,
+    weights_found: bool,
+    /// The worker is running right now.
+    running: bool,
+    /// Why the last request failed, when it did.
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn needle_status(app: tauri::AppHandle) -> NeedleStatus {
+    // An agent (or Setup on another tab) can write the two keys while the app runs.
+    refresh_if_changed();
+    let c = config();
+    let python_found = c.needle_python.as_deref().is_some_and(Path::is_file);
+    let weights_found = c.needle_weights.as_deref().is_some_and(Path::is_file);
+    let mut error = needle_error();
+    if error.is_none() && needle_script_path(&app).is_none() {
+        error = Some("needle_serve.py is missing".into());
+    }
+    NeedleStatus {
+        configured: c.needle_configured(),
+        python_found,
+        weights_found,
+        running: needle_running(),
+        error,
+    }
+}
+
+/// Asks the sidecar for tool calls. A crash (or a hung worker) restarts it once and tries again.
+#[tauri::command]
+async fn needle_ask(
+    app: tauri::AppHandle,
+    text: String,
+    tools: Vec<serde_json::Value>,
+) -> Result<NeedleResult, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("say the command first".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        let out = run_powershell(&script, &[text, "-DryRun".to_string()])?;
-        Ok(ProcessRun {
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            code: out.status.code().unwrap_or(-1),
-        })
+        let result = needle_ask_blocking(&app, &text, &tools).or_else(|first| {
+            // One restart: a killed worker, a timed-out answer or a dead process.
+            needle_kill();
+            needle_ask_blocking(&app, &text, &tools)
+                .map_err(|second| format!("{second} (after a restart; first try: {first})"))
+        });
+        match &result {
+            Ok(_) => set_needle_error(None),
+            Err(e) => set_needle_error(Some(e.clone())),
+        }
+        result
     })
     .await
-    .map_err(|e| format!("quick log task failed: {e}"))?
+    .map_err(|e| format!("Needle task failed: {e}"))?
+}
+
+/// Writes the two Needle keys (or removes them with None = turn off) and stops the worker, so the
+/// next command uses the new paths. Every other config key is kept. Off the UI thread: stopping a
+/// busy worker can wait for one answer.
+#[tauri::command]
+async fn needle_configure(python: Option<String>, weights: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || needle_configure_now(python, weights))
+        .await
+        .map_err(|e| format!("Needle setup failed: {e}"))?
+}
+
+fn needle_configure_now(python: Option<String>, weights: Option<String>) -> Result<(), String> {
+    let clean = |value: Option<String>| {
+        value
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let python = clean(python);
+    let weights = clean(weights);
+    for path in [&python, &weights].into_iter().flatten() {
+        let p = PathBuf::from(path);
+        if !p.is_absolute() {
+            return Err(format!("the path must be absolute: {path}"));
+        }
+        if !p.is_file() {
+            return Err(format!("not a file: {path}"));
+        }
+    }
+    if python.is_some() != weights.is_some() {
+        return Err("set both the Python and the weights, or neither".into());
+    }
+
+    let target = config_target_path();
+    let mut json = config_json_object(&target);
+    for (key, value) in [("needlePython", python), ("needleWeights", weights)] {
+        match value {
+            Some(text) => {
+                json.insert(key.to_string(), serde_json::Value::String(text));
+            }
+            None => {
+                json.remove(key);
+            }
+        }
+    }
+    write_config_json(&target, &json)?;
+    needle_kill();
+    set_needle_error(None);
+    reload_config();
+    Ok(())
 }
 
 /// The project name of a `Projects/<Name>` folder: no separators or wildcards, never `.` or `..`.
 fn valid_project_name(name: &str) -> bool {
+
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -933,61 +1236,440 @@ fn valid_project_name(name: &str) -> bool {
             .any(|c| matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
 }
 
-/// Logs one bullet with vlog.ps1, always as harness "me". The project folder must exist in the vault.
+/// Local date and time, as Windows reports it.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WinLocalTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    /// Fills `time` with the machine's local date and time.
+    fn GetLocalTime(time: *mut WinLocalTime);
+}
+
+/// Today's date as YYYY-MM-DD in local time, which is what names the daily log.
+fn today_local() -> String {
+    #[cfg(windows)]
+    {
+        let mut now = WinLocalTime::default();
+        // SAFETY: GetLocalTime only writes into the struct it is handed.
+        unsafe { GetLocalTime(&mut now) };
+        if now.year > 0 {
+            return format!("{:04}-{:02}-{:02}", now.year, now.month, now.day);
+        }
+    }
+    today_utc()
+}
+
+/// Reads a text file, dropping a byte-order mark so a rewrite stays free of one.
+fn read_text_file(path: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+}
+
+/// The lines of a note, with the trailing empty line of a final newline removed (and remembered).
+fn note_lines(text: &str) -> (Vec<String>, bool) {
+    let ends_with_newline = text.ends_with('\n');
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect();
+    if ends_with_newline {
+        lines.pop();
+    }
+    (lines, ends_with_newline)
+}
+
+/// Joins the lines with LF, keeping the note's trailing newline when it had one.
+fn join_lines(lines: &[String], trailing_newline: bool) -> String {
+    let mut out = lines.join("\n");
+    if trailing_newline && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// True for a `## ` or `##\t` heading line (`###` does not count, as in the reference script).
+fn is_h2(line: &str) -> bool {
+    line.starts_with("## ") || line.starts_with("##\t")
+}
+
+/// True for the heading of the `## name` section (the name is compared without case).
+fn is_section(line: &str, name: &str) -> bool {
+    is_h2(line) && line[2..].trim().eq_ignore_ascii_case(name)
+}
+
+/// The heading line and the end (exclusive) of a `## name` section.
+fn section_range(lines: &[String], name: &str) -> Option<(usize, usize)> {
+    let heading = lines.iter().position(|line| is_section(line, name))?;
+    let mut end = heading + 1;
+    while end < lines.len() && !is_h2(&lines[end]) {
+        end += 1;
+    }
+    Some((heading, end))
+}
+
+/// Where a new item goes: right after the last non-blank line of the section.
+fn last_item(lines: &[String], heading: usize, end: usize) -> usize {
+    let mut at = end;
+    while at > heading + 1 && lines[at - 1].trim().is_empty() {
+        at -= 1;
+    }
+    at
+}
+
+/// The `## name` section, created at the end of the `after` section (or of the note) when missing.
+fn ensure_section(lines: &mut Vec<String>, name: &str, after: &str) -> (usize, usize) {
+    if let Some(range) = section_range(lines, name) {
+        return range;
+    }
+    let at = section_range(lines, after)
+        .map(|(_, end)| end)
+        .unwrap_or(lines.len());
+    let mut insert = Vec::new();
+    if at > 0 && !lines[at - 1].trim().is_empty() {
+        insert.push(String::new());
+    }
+    insert.push(format!("## {name}"));
+    insert.push(String::new());
+    lines.splice(at..at, insert);
+    section_range(lines, name).expect("the section was just inserted")
+}
+
+/// The text of an open `- [ ] task` or plain `- task` bullet. Checked items and other lines are None.
+fn open_item(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("- ")?;
+    if rest.starts_with("[x]") || rest.starts_with("[X]") {
+        return None;
+    }
+    let text = rest.strip_prefix("[ ] ").unwrap_or(rest).trim_end();
+    (!text.is_empty()).then_some(text)
+}
+
+/// True for a line that leads with whitespace and then has content: a bullet's sub-lines.
+fn is_indented(line: &str) -> bool {
+    line.starts_with(char::is_whitespace) && !line.trim_start().is_empty()
+}
+
+/// True when `line` is the frontmatter key `key` (`key: value` at column 0).
+fn frontmatter_line(line: &str, key: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    line.strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with(':'))
+}
+
+/// Sets a frontmatter key: replaces its line, or inserts it before the closing `---`.
+/// A note without frontmatter is left alone.
+fn set_field(lines: &mut Vec<String>, key: &str, value: &str) {
+    if lines.first().map(|line| line.trim_end()) != Some("---") {
+        return;
+    }
+    let Some(close) = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(i, line)| (line.trim_end() == "---").then_some(i))
+    else {
+        return;
+    };
+    if let Some(at) = (1..close).find(|&i| frontmatter_line(&lines[i], key)) {
+        lines[at] = format!("{key}: {value}");
+        return;
+    }
+    lines.insert(close, format!("{key}: {value}"));
+}
+
+/// One entry on its way into the vault.
+struct LogWrite {
+    project: String,
+    /// "task" or "update".
+    kind: String,
+    text: String,
+    /// "claude code", "antigravity", "opencode" or "me".
+    harness: String,
+    /// Words of an open `## Next` item this finishes (kind task only).
+    task: String,
+    /// New `next` frontmatter value.
+    next: Option<String>,
+    /// New tasks for `## Next`.
+    add: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct LogResult {
+    message: String,
+    /// The open task that moved to `## Done`, when one matched.
+    ticked: Option<String>,
+}
+
+/// Writes one entry: the daily bullet, the ticked task, new tasks and the note's frontmatter.
+/// `date` is passed in so the behaviour can be tested without a clock.
+fn write_log_entry(vault: &Path, date: &str, entry: &LogWrite) -> Result<LogResult, String> {
+    let project = entry.project.as_str();
+    let note = vault
+        .join("Projects")
+        .join(project)
+        .join(format!("{project}.md"));
+    if !note.is_file() {
+        return Err(format!("no project note: {}", note.display()));
+    }
+
+    // The daily log: one bullet at the end, after a newline.
+    let log = vault.join("Log").join(format!("{date}.md"));
+    let mut log_text = if log.is_file() {
+        read_text_file(&log)?
+    } else {
+        format!("---\ntype: log\ndate: {date}\n---\n\n## Done today\n")
+    };
+    if !log_text.ends_with('\n') {
+        log_text.push('\n');
+    }
+    log_text.push_str(&format!(
+        "- [[Projects/{project}/{project}|{project}]] — #{} {} ({})\n",
+        entry.kind, entry.text, entry.harness
+    ));
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    fs::write(&log, log_text).map_err(|e| format!("write {}: {e}", log.display()))?;
+
+    // The project note: the ticked task, then new tasks, then the frontmatter.
+    let (mut lines, trailing_newline) = note_lines(&read_text_file(&note)?);
+
+    let mut ticked: Option<String> = None;
+    if entry.kind == "task" {
+        let needle = if entry.task.trim().is_empty() {
+            entry.text.as_str()
+        } else {
+            entry.task.trim()
+        };
+        let needle = needle.to_lowercase();
+        let mut hit: Option<(usize, usize, String)> = None;
+        if let Some((start, end)) = section_range(&lines, "Next") {
+            let mut i = start + 1;
+            while i < end {
+                let found = open_item(&lines[i])
+                    .filter(|text| text.to_lowercase().contains(&needle))
+                    .map(str::to_string);
+                if let Some(text) = found {
+                    // The bullet and its indented sub-lines move together.
+                    let mut stop = i + 1;
+                    while stop < lines.len() && is_indented(&lines[stop]) {
+                        stop += 1;
+                    }
+                    hit = Some((i, stop, text));
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if let Some((from, to, text)) = hit {
+            let sub_lines: Vec<String> = lines[from + 1..to].to_vec();
+            lines.drain(from..to);
+            let (heading, end) = ensure_section(&mut lines, "Done", "Next");
+            let at = last_item(&lines, heading, end);
+            let mut block = vec![format!("- [x] {text}")];
+            block.extend(sub_lines);
+            lines.splice(at..at, block);
+            ticked = Some(text);
+        }
+    }
+
+    let adds: Vec<String> = entry
+        .add
+        .iter()
+        .map(|task| task.trim())
+        .filter(|task| !task.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !adds.is_empty() {
+        let (heading, end) = ensure_section(&mut lines, "Next", "Goal");
+        let mut at = last_item(&lines, heading, end);
+        for task in &adds {
+            lines.insert(at, format!("- [ ] {task}"));
+            at += 1;
+        }
+    }
+
+    set_field(&mut lines, "updated", date);
+    set_field(&mut lines, "harness", &entry.harness);
+    let next = entry.next.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    if let Some(next) = next {
+        set_field(&mut lines, "next", &format!("\"{}\"", next.replace('"', "'")));
+    }
+
+    fs::write(&note, join_lines(&lines, trailing_newline))
+        .map_err(|e| format!("write {}: {e}", note.display()))?;
+
+    let mut message = format!("logged #{} to {date}", entry.kind);
+    if entry.kind == "task" {
+        match &ticked {
+            Some(text) => message.push_str(&format!("; ticked: {text}")),
+            None => message.push_str("; no matching open task (log only)"),
+        }
+    }
+    if !adds.is_empty() {
+        message.push_str(&format!("; added {} task(s)", adds.len()));
+    }
+    Ok(LogResult { message, ticked })
+}
+
+/// Lowercase, backslashes, no verbatim prefix and no trailing slash. For comparing Windows paths.
+fn norm_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    without_prefix
+        .replace('/', "\\")
+        .to_lowercase()
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// True when `path` is `parent` itself or inside it.
+fn is_same_or_inside(path: &str, parent: &str) -> bool {
+    if path.is_empty() || parent.is_empty() {
+        return false;
+    }
+    path == parent || path.starts_with(&format!("{parent}\\"))
+}
+
+/// A YAML value without its quotes (`- path: "C:\x"` and `- path: C:\x` are the same path).
+fn unquote(value: &str) -> String {
+    let trimmed = value.trim();
+    for quote in ['"', '\''] {
+        if trimmed.len() >= 2 && trimmed.starts_with(quote) && trimmed.ends_with(quote) {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// The lock covering `path` (itself or a parent) in locks.yaml: (locked path, mode).
+/// A path without a mode line counts as read-only, the safer reading.
+fn lock_covering(path: &Path, yaml: &str) -> Option<(String, String)> {
+    let target = norm_path(&path_text(path));
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim_start_matches('-').trim();
+        match key {
+            "path" => pending = Some(unquote(value)),
+            "mode" => {
+                if let Some(locked) = pending.take() {
+                    entries.push((locked, unquote(value)));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(locked) = pending {
+        entries.push((locked, "read-only".to_string()));
+    }
+
+    let mut best: Option<(String, String, usize)> = None;
+    for (locked, mode) in entries {
+        let normalized = norm_path(&locked);
+        if !is_same_or_inside(&target, &normalized) {
+            continue;
+        }
+        // The deepest lock wins, as in the app's own lockAt().
+        if best.as_ref().is_none_or(|(_, _, len)| normalized.len() > *len) {
+            let mode = if mode.trim().eq_ignore_ascii_case("no-ai") {
+                "no-ai"
+            } else {
+                "read-only"
+            };
+            best = Some((locked, mode.to_string(), normalized.len()));
+        }
+    }
+    best.map(|(locked, mode, _)| (locked, mode))
+}
+
+/// Refuses a write inside a read-only or no-ai lock. locks.yaml is the only source, as in the app.
+fn ensure_unlocked(c: &Config, paths: &[&Path]) -> Result<(), String> {
+    let yaml = fs::read_to_string(c.hub.join("locks.yaml")).unwrap_or_default();
+    if yaml.trim().is_empty() {
+        return Ok(());
+    }
+    for path in paths {
+        if let Some((locked, mode)) = lock_covering(path, &yaml) {
+            return Err(format!(
+                "{} is locked {mode} by {locked}: unlock it in Hub > Locks first",
+                path_text(path)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Logs one entry into the vault: today's log bullet, the ticked task and the note's frontmatter.
+/// The vault is the only thing written; no script is involved, so quick log always works.
 #[tauri::command]
-async fn quicklog_commit(
+fn log_entry(
     project: String,
     kind: String,
     text: String,
+    harness: String,
     task: Option<String>,
-) -> Result<String, String> {
-    if kind != "task" && kind != "update" {
-        return Err("kind must be task or update".into());
-    }
+    next: Option<String>,
+    add: Option<Vec<String>>,
+) -> Result<LogResult, String> {
     let project = project.trim().to_string();
     if !valid_project_name(&project) {
         return Err(format!("not a project name: {project}"));
     }
-    let folder = config().projects().join(&project);
-    if !folder.is_dir() {
-        return Err(format!("no project folder: {}", folder.display()));
+    if kind != "task" && kind != "update" {
+        return Err("kind must be task or update".into());
+    }
+    let harness = harness.trim().to_lowercase();
+    if !matches!(harness.as_str(), "claude code" | "antigravity" | "opencode" | "me") {
+        return Err(format!("unknown harness: {harness}"));
     }
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("the log text is empty".into());
     }
-    let task = task.unwrap_or_default().trim().to_string();
-    let script = config()
-        .vlog
-        .clone()
-        .ok_or("quick log is off: set \"vlog\" and \"needleLog\" in corvoid-hub.json")?;
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut args = vec![
-            "-Project".to_string(),
+    let c = config();
+    let date = today_local();
+    let note = c.projects().join(&project).join(format!("{project}.md"));
+    let log = c.logs().join(format!("{date}.md"));
+    ensure_unlocked(&c, &[note.as_path(), log.as_path()])?;
+
+    write_log_entry(
+        &c.vault,
+        &date,
+        &LogWrite {
             project,
-            "-Kind".to_string(),
             kind,
-            "-Text".to_string(),
             text,
-            "-Harness".to_string(),
-            "me".to_string(),
-        ];
-        if !task.is_empty() {
-            args.push("-Task".into());
-            args.push(task);
-        }
-        let out = run_powershell(&script, &args)?;
-        let message = output_text(&out);
-        if out.status.success() {
-            Ok(message)
-        } else {
-            Err(format!("vlog exited with {}\n{message}", out.status))
-        }
-    })
-    .await
-    .map_err(|e| format!("quick log task failed: {e}"))?
+            harness,
+            task: task.unwrap_or_default().trim().to_string(),
+            next,
+            add: add.unwrap_or_default(),
+        },
+    )
 }
+
 
 /// Applies locks.yaml to disk (read-only bits and the Claude Code deny rules) and returns the script output.
 #[tauri::command]
@@ -1273,7 +1955,8 @@ fn trim_opt(value: Option<String>) -> Option<String> {
 }
 
 /// Writes the config file, creates the hub and vault folders, and (optionally) copies the starters
-/// that are missing. Keys the dialog does not show (vlog, needleLog, logDir) are kept as they are.
+/// that are missing. Keys the dialog does not show (needlePython, needleWeights, logDir,
+/// backupDir, autoBackup, keepBackups) are kept as they are.
 /// Then the config is reloaded, so the app uses the new paths without a restart.
 #[tauri::command]
 fn setup_save(fields: SetupFields, create_starters: bool) -> Result<SetupSaveResult, String> {
@@ -2370,8 +3053,10 @@ pub fn run() {
             skill_copy_to_hub,
             skill_transfer,
             skill_remove,
-            quicklog_suggest,
-            quicklog_commit,
+            needle_status,
+            needle_ask,
+            needle_configure,
+            log_entry,
             apply_locks,
             setup_detect,
             setup_save,
@@ -2390,7 +3075,205 @@ pub fn run() {
                 let _ = webview.window().show();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // The Needle sidecar is a child process: never leave it running behind the app.
+            if matches!(event, tauri::RunEvent::Exit) {
+                needle_kill();
+            }
+        });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOTE: &str = "---
+type: project
+status: active
+category: [game-dev]
+log: auto
+version: 1
+harness: \"claude code\"
+next: \"Boss fight\"
+updated: 2026-01-01
+repo: 'C:\\Dev\\demo'
+---
+
+## Goal
+
+Demo project.
+
+## Next
+
+- [ ] Boss fight
+  - phase one
+  - phase two
+- [ ] Save system
+
+## Done
+
+- [x] Player movement
+
+## History
+
+## Notes
+";
+
+    const DATE: &str = "2026-05-01";
+
+    fn temp_vault(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("corvoid-hub-log-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("Projects").join("Demo")).unwrap();
+        fs::create_dir_all(dir.join("Log")).unwrap();
+        fs::write(dir.join("Projects").join("Demo").join("Demo.md"), NOTE).unwrap();
+        dir
+    }
+
+    fn cleanup(vault: &Path) {
+        let _ = fs::remove_dir_all(vault);
+    }
+
+    fn entry(kind: &str, text: &str) -> LogWrite {
+        LogWrite {
+            project: "Demo".to_string(),
+            kind: kind.to_string(),
+            text: text.to_string(),
+            harness: "me".to_string(),
+            task: String::new(),
+            next: None,
+            add: Vec::new(),
+        }
+    }
+
+    fn note_text(vault: &Path) -> String {
+        fs::read_to_string(vault.join("Projects").join("Demo").join("Demo.md")).unwrap()
+    }
+
+    #[test]
+    fn writes_a_new_daily_log() {
+        let vault = temp_vault("new-log");
+        let result = write_log_entry(&vault, DATE, &entry("update", "Fixed the redirect")).unwrap();
+
+        let log = fs::read_to_string(vault.join("Log").join(format!("{DATE}.md"))).unwrap();
+        assert_eq!(
+            log,
+            format!(
+                "---\ntype: log\ndate: {DATE}\n---\n\n## Done today\n\
+                 - [[Projects/Demo/Demo|Demo]] — #update Fixed the redirect (me)\n"
+            )
+        );
+        assert_eq!(result.message, format!("logged #update to {DATE}"));
+        assert_eq!(result.ticked, None);
+        // No byte-order mark.
+        let raw = fs::read(vault.join("Log").join(format!("{DATE}.md"))).unwrap();
+        assert_ne!(&raw[..3], &[0xEF, 0xBB, 0xBF]);
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn appends_to_an_existing_log_after_a_newline() {
+        let vault = temp_vault("append");
+        let log = vault.join("Log").join(format!("{DATE}.md"));
+        fs::write(
+            &log,
+            format!("---\ntype: log\ndate: {DATE}\n---\n\n## Done today\n- earlier bullet"),
+        )
+        .unwrap();
+
+        write_log_entry(&vault, DATE, &entry("update", "Second pass")).unwrap();
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.ends_with("- earlier bullet\n- [[Projects/Demo/Demo|Demo]] — #update Second pass (me)\n"));
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn ticks_the_matching_task_with_its_sub_lines() {
+        let vault = temp_vault("tick");
+        let mut item = entry("task", "Finished the boss fight");
+        item.task = "boss fight".to_string();
+        let result = write_log_entry(&vault, DATE, &item).unwrap();
+
+        assert_eq!(result.ticked.as_deref(), Some("Boss fight"));
+        assert!(result.message.ends_with("ticked: Boss fight"));
+
+        let note = note_text(&vault);
+        assert!(note.contains(
+            "## Done\n\n- [x] Player movement\n- [x] Boss fight\n  - phase one\n  - phase two\n\n## History"
+        ));
+        assert!(note.contains("## Next\n\n- [ ] Save system\n"));
+        assert!(!note.contains("- [ ] Boss fight"));
+        assert!(note.contains(&format!("updated: {DATE}")));
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn a_task_with_no_match_is_only_logged() {
+        let vault = temp_vault("no-match");
+        let mut item = entry("task", "Sound pass");
+        item.task = "Sound pass".to_string();
+        let result = write_log_entry(&vault, DATE, &item).unwrap();
+
+        assert_eq!(result.ticked, None);
+        assert!(result.message.contains("no matching open task (log only)"));
+        assert!(note_text(&vault).contains("- [ ] Boss fight\n"));
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn adds_new_tasks_to_next() {
+        let vault = temp_vault("add");
+        let mut item = entry("update", "Planned the rest");
+        item.add = vec!["Ship demo".to_string(), "  Write docs  ".to_string()];
+        let result = write_log_entry(&vault, DATE, &item).unwrap();
+
+        assert!(result.message.ends_with("added 2 task(s)"));
+        let note = note_text(&vault);
+        assert!(note.contains("## Next\n\n- [ ] Boss fight\n  - phase one\n  - phase two\n- [ ] Save system\n- [ ] Ship demo\n- [ ] Write docs\n"));
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn sets_frontmatter_fields() {
+        let vault = temp_vault("frontmatter");
+        let note = vault.join("Projects").join("Demo").join("Demo.md");
+        fs::write(
+            &note,
+            "---\ntype: project\nstatus: active\nharness: \"claude code\"\n---\n\n## Goal\n\nDemo.\n",
+        )
+        .unwrap();
+
+        let mut item = entry("update", "Planned it");
+        item.harness = "opencode".to_string();
+        item.next = Some("Say \"hello\"".to_string());
+        write_log_entry(&vault, DATE, &item).unwrap();
+
+        let text = fs::read_to_string(&note).unwrap();
+        assert!(text.starts_with(&format!(
+            "---\ntype: project\nstatus: active\nharness: opencode\nupdated: {DATE}\nnext: \"Say 'hello'\"\n---\n"
+        )));
+        assert!(text.contains("\n---\n\n## Goal\n"));
+        cleanup(&vault);
+    }
+
+    #[test]
+    fn a_lock_covers_its_folder() {
+        let yaml = "# comment\n- path: C:\\Vault\\Projects\\Demo\n  mode: no-ai\n- path: C:\\Vault\\Log\n  mode: read-only\n";
+        let demo = PathBuf::from(r"C:\Vault\Projects\Demo\Demo.md");
+        let log = PathBuf::from(r"C:\Vault\Log\2026-05-01.md");
+        let other = PathBuf::from(r"C:\Vault\Projects\Other\Other.md");
+        assert_eq!(
+            lock_covering(&demo, yaml),
+            Some(("C:\\Vault\\Projects\\Demo".to_string(), "no-ai".to_string()))
+        );
+        assert_eq!(
+            lock_covering(&log, yaml),
+            Some(("C:\\Vault\\Log".to_string(), "read-only".to_string()))
+        );
+        assert_eq!(lock_covering(&other, yaml), None);
+    }
+}
+
 

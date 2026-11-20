@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Copy, Inbox, Play, RefreshCw, Search, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
@@ -25,6 +25,7 @@ import { useLoad } from "@/core/hooks"
 import { inboxAgentPrompt, loadInbox } from "@/core/hub"
 import { lockAt, useLocks, type LockEntry } from "@/core/locks"
 import { navigate, useRoute } from "@/core/navigation"
+import { DATA_CHANGED_EVENT } from "@/core/needle-actions"
 import {
   loadSkillIndex,
   type SkillEntry,
@@ -118,6 +119,13 @@ export function SkillsPage() {
     index.reload()
     inbox.reload()
   }
+
+  // A palette command can move a skill to another folder.
+  useEffect(() => {
+    window.addEventListener(DATA_CHANGED_EVENT, reloadAll)
+    return () => window.removeEventListener(DATA_CHANGED_EVENT, reloadAll)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index.reload, inbox.reload])
 
   async function copyPrompt(name: string) {
     try {

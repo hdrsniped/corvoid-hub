@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Moon, Search, Sun } from "lucide-react"
+import { Moon, Search, Sparkles, Sun } from "lucide-react"
 
 import {
   CommandPalette,
@@ -26,6 +26,13 @@ import {
 } from "@/components/ui/sidebar"
 import { ToolbarSlotContext } from "@/components/page-toolbar"
 import { cfg, onConfigChange } from "@/core/config"
+import {
+  NEEDLE_DOT_KEY,
+  NEEDLE_SEEN_EVENT,
+  isNeedleReady,
+  needleStatus,
+  needleTipSeen,
+} from "@/core/needle"
 import { useRoute } from "@/core/navigation"
 import { findModuleByRoute, modules } from "@/modules/registry"
 
@@ -40,8 +47,32 @@ export function AppShell() {
   const [toolbarSlot, setToolbarSlot] = useState<HTMLDivElement | null>(null)
   // Setup changes the roots, so the open screen remounts and loads from the new folders.
   const [configVersion, setConfigVersion] = useState(0)
+  /** The Sparkles dot on the Search button, until the palette is opened once with Needle ready. */
+  const [needleDot, setNeedleDot] = useState(false)
 
   useEffect(() => onConfigChange(() => setConfigVersion((v) => v + 1)), [])
+
+  // The add-on can be set up at any time (Setup, Hub > Add-ons, or an agent writing the config).
+  useEffect(() => {
+    let cancelled = false
+    needleStatus()
+      .then((status) => {
+        if (cancelled) return
+        setNeedleDot(isNeedleReady(status) && !needleTipSeen(NEEDLE_DOT_KEY))
+      })
+      .catch(() => {
+        // No status means no dot; the app works as usual.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [configVersion])
+
+  useEffect(() => {
+    const hide = () => setNeedleDot(false)
+    window.addEventListener(NEEDLE_SEEN_EVENT, hide)
+    return () => window.removeEventListener(NEEDLE_SEEN_EVENT, hide)
+  }, [])
 
   const isDark =
     theme === "dark" ||
@@ -81,6 +112,12 @@ export function AppShell() {
             <span className="flex items-center gap-2">
               <Search />
               Search
+              {needleDot && (
+                <Sparkles
+                  className="size-3 text-primary"
+                  aria-label="Ctrl+K understands plain commands"
+                />
+              )}
             </span>
             <kbd className="rounded border bg-muted px-1.5 py-0.5 font-sans text-[10px] text-muted-foreground">
               Ctrl K

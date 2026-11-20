@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Cell, Pie, PieChart } from "recharts"
 import { FolderOpen, RefreshCw } from "lucide-react"
 
@@ -38,6 +38,7 @@ import { cx } from "@/core/format"
 import { useLoad } from "@/core/hooks"
 import { lockOf, useLocks } from "@/core/locks"
 import { navigate, useRoute } from "@/core/navigation"
+import { DATA_CHANGED_EVENT } from "@/core/needle-actions"
 import type { ProjectStatus } from "@/core/types"
 import {
   loadProjects,
@@ -78,8 +79,8 @@ export function ProjectsPage() {
   const categories = useLoad(loadCategories, [])
   const { locks } = useLocks()
   const dark = useDark()
-  const [filter, setFilter] = useState<Filter>("all")
-  const [categoryFilter, setCategoryFilter] = useState<string>(ALL)
+  const [filterPick, setFilterPick] = useState<Filter | null>(null)
+  const [categoryPick, setCategoryPick] = useState<string | null>(null)
   const [manualOpen, setManualOpen] = useState<string | null>(null)
   // The command palette (and a plain link) opens a project with #/projects?open=<name>.
   const { params } = useRoute()
@@ -88,10 +89,28 @@ export function ProjectsPage() {
   // cannot block the sheet; closing the sheet drops both.
   const openName = manualOpen ?? openParam
 
+  // A palette command that saves a project note fires this, so the open cards show the new state.
+  useEffect(() => {
+    window.addEventListener(DATA_CHANGED_EVENT, reload)
+    return () => window.removeEventListener(DATA_CHANGED_EVENT, reload)
+  }, [reload])
+
   const categoryList = useMemo(
     () => categories.data?.categories ?? [],
     [categories.data]
   )
+  // A command can filter through the hash (#/projects?status=active&category=game-dev); a chip
+  // click wins over the query until the filters change.
+  const statusParam = params.get("status")
+  const categoryParam = params.get("category")
+  const filter: Filter =
+    filterPick ??
+    (PROJECT_STATUSES.includes(statusParam as ProjectStatus) ? (statusParam as Filter) : "all")
+  const categoryFilter =
+    categoryPick ??
+    (categoryParam === NONE || categoryList.some((c) => c.slug === categoryParam)
+      ? (categoryParam as string)
+      : ALL)
   const projects = useMemo(() => data?.projects ?? [], [data])
   const counts = useMemo(
     () =>
@@ -235,7 +254,7 @@ export function ProjectsPage() {
                     key={f}
                     size="sm"
                     variant={filter === f ? "default" : "outline"}
-                    onClick={() => setFilter(f)}
+                    onClick={() => setFilterPick(f)}
                   >
                     {f === "all" ? "All" : STATUS_LABEL[f]}
                     <span className="tabular-nums opacity-70">{count}</span>
@@ -244,7 +263,7 @@ export function ProjectsPage() {
               })}
               <Select
                 value={categoryFilter}
-                onValueChange={(v) => v && setCategoryFilter(v)}
+                onValueChange={(v) => v && setCategoryPick(String(v))}
                 items={categoryItems}
               >
                 <SelectTrigger

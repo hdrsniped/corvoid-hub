@@ -100,31 +100,37 @@ export function applyLocks(): Promise<string> {
   return invoke<string>("apply_locks")
 }
 
-/** stdout, stderr and exit code of a script that reports its own result (quick log uses 0/3/4). */
-export interface ProcessRun {
-  stdout: string
-  stderr: string
-  code: number
+/** What log_entry wrote: a message for the toast, and the task it ticked when one matched. */
+export interface LogResult {
+  message: string
+  ticked: string | null
 }
 
-/** Runs needle-log.ps1 with -DryRun: it suggests a project and never writes. */
-export function quicklogSuggest(sentence: string): Promise<ProcessRun> {
-  return invoke<ProcessRun>("quicklog_suggest", { sentence })
-}
-
-/** Logs one bullet with vlog.ps1 as harness "me". Resolves with vlog's own message. */
-export function quicklogCommit(args: {
+/**
+ * Logs one entry into the vault (Rust writes the log bullet, ticks the task and sets the note's
+ * frontmatter). Resolves with what it did. No script is involved.
+ */
+export function logEntry(args: {
   project: string
   kind: "task" | "update"
   text: string
-  /** Words of an open `## Next` task this finishes, or null. */
+  /** "claude code", "antigravity", "opencode" or "me". */
+  harness: string
+  /** Words of an open `## Next` task this finishes (task only). */
   task?: string | null
-}): Promise<string> {
-  return invoke<string>("quicklog_commit", {
+  /** New `next` frontmatter value. */
+  next?: string | null
+  /** New tasks for `## Next`. */
+  add?: string[]
+}): Promise<LogResult> {
+  return invoke<LogResult>("log_entry", {
     project: args.project,
     kind: args.kind,
     text: args.text,
+    harness: args.harness,
     task: args.task ?? null,
+    next: args.next ?? null,
+    add: args.add ?? [],
   })
 }
 

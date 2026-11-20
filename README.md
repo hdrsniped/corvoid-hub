@@ -25,7 +25,8 @@ The app is optional. Everything it does is a plain file edit, so any AI agent ca
 ## Highlights
 
 - **Projects**: cards with status, category colors, task progress (`3/5`), versions (v1 → v2) and the harness that last touched it.
-- **Activity**: a stacked chart of work per project, harness usage and a log timeline. Quick log with `Ctrl+L`.
+- **Activity**: a stacked chart of work per project, harness usage and a log timeline. Quick log (`Ctrl+L`) works out of the box: one sentence, it writes today's bullet and ticks the task it finishes, no scripts needed.
+- **Plain-language commands** (optional Needle add-on, offline): type “add task fix login to Corvogames” in `Ctrl+K`; every write is confirmed first.
 - **Mind graph**: projects, notes and log days, linked by wikilinks.
 - **Skills**: hub skills shared to every harness, plus each harness's own. Move a skill between the hub, Claude Code and Antigravity, or remove it (it goes to a backup, never hard-deleted).
 - **Transfer**: one copy-paste prompt that hands a project to another harness with everything it needs.
@@ -75,8 +76,8 @@ You can also edit it by hand; the app picks up changes as soon as it reads the f
   "claudeSkills": "C:\\Users\\you\\.claude\\skills",
   "antigravitySkills": "C:\\Users\\you\\.gemini\\config\\skills",
   "opencodeConfig": "C:\\Users\\you\\.config\\opencode",
-  "vlog": "C:\\Users\\you\\tools\\vlog\\vlog.ps1",
-  "needleLog": "C:\\Users\\you\\tools\\needle-log\\needle-log.ps1",
+  "needlePython": "C:\\Users\\you\\tools\\needle\\venv\\Scripts\\python.exe",
+  "needleWeights": "C:\\Users\\you\\tools\\needle\\models\\needle3.cact",
   "backupDir": "C:\\Users\\you\\ai-hub\\backups\\corvoid",
   "autoBackup": "daily",
   "keepBackups": 10
@@ -91,11 +92,24 @@ You can also edit it by hand; the app picks up changes as soon as it reads the f
 | `antigravitySkills` | Antigravity skill folder | `%USERPROFILE%\.gemini\config\skills` |
 | `opencodeConfig` | OpenCode config folder (`opencode.json` / `.jsonc`) | `%USERPROFILE%\.config\opencode` |
 | `antigravityExe` | Antigravity's `Antigravity.exe`, used for its icon | the installed app, if any |
-| `vlog`, `needleLog` | Optional scripts for quick log | off |
+| `needlePython` | Optional: Python of the Needle add-on (its own virtual environment) | off |
+| `needleWeights` | Optional: `needle3.cact` weights of the Needle add-on | off |
 | `logDir` | The app's own logs | `<hub>\.logs` |
 | `backupDir` | Where backups (`corvoid-backup-*.zip`) are written and listed | `<hub>\backups\corvoid` |
 | `autoBackup` | `daily`, `weekly` or `off`: a backup on app start when the newest one is older | `daily` |
 | `keepBackups` | How many backups stay; older ones are pruned | `10` |
+
+## Add-ons → Needle
+
+The optional **Needle** add-on makes `Ctrl+K` understand plain language: “add task fix login to Corvogames”, “log an update on Starfall: tuned the boss fight”, “set Corvogames to paused”, “back up now”. A small local model (Cactus “Needle 3”) runs in a sidecar process, so a command never leaves the machine. Safe commands (open a project, open a screen, open a skill or app) run on Enter; anything that writes opens a confirm card with editable fields first.
+
+Install it once:
+
+1. **Setup → Add-ons → Set up with AI** copies a prompt for Claude Code, Antigravity or OpenCode: it creates a virtual environment, runs `pip install cactus-compute`, downloads the weights and writes `needlePython` / `needleWeights` into `corvoid-hub.json` (asking before it writes).
+2. Or **I have it** and pick the Python and the `needle3.cact` file yourself.
+3. **Hub → Add-ons → Test** checks it with a real command and shows the parsed call.
+
+The sidecar is `addons/needle/needle_serve.py`. It loads the model once, keeps the engine cache next to the weights and stays offline (`CACTUS_TELEMETRY=0`, `HF_HUB_OFFLINE=1`). The weights are Apache-2.0 by Cactus Compute: [huggingface.co/Cactus-Compute/needle3](https://huggingface.co/Cactus-Compute/needle3). Skipping the add-on leaves the rest of the app unchanged; quick log keeps its built-in guesses.
 
 ## How it works
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { Check, ChevronDown, Copy, FolderOpen, Loader2, Save } from "lucide-react"
+import { Check, ChevronDown, Copy, FolderOpen, Loader2, Save, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
 import { HarnessGlyph } from "@/components/harness-icon"
@@ -45,6 +45,17 @@ import {
 } from "@/core/harness"
 import { buildSetupPrompt } from "@/core/setup-prompt"
 import {
+  isNeedleReady,
+  needleConfigure,
+  needleStatus,
+  needleTipSeen,
+  rememberNeedleTip,
+  NEEDLE_TIP_KEY,
+  type NeedleStatus,
+} from "@/core/needle"
+import { buildNeedleSetupPrompt } from "@/core/needle-setup-prompt"
+import {
+  configPath,
   setupDetect,
   setupSave,
   setupWireRules,
@@ -53,11 +64,14 @@ import {
   type WireResult,
 } from "@/core/setup"
 
+/** The tabs of the setup dialog. Add-ons is optional and can be skipped. */
+export type SetupSection = "ai" | "manual" | "addons"
+
 /** Window event that opens the setup dialog, so a toolbar button needs no shared state. */
 const SETUP_EVENT = "hub:setup"
 
-export function openSetup(): void {
-  window.dispatchEvent(new Event(SETUP_EVENT))
+export function openSetup(section: SetupSection = "ai"): void {
+  window.dispatchEvent(new CustomEvent(SETUP_EVENT, { detail: section }))
 }
 
 const POLL_MS = 2000
@@ -69,9 +83,15 @@ const POLL_MS = 2000
 export function SetupDialog() {
   // A fresh install opens it by itself; after that it is a toolbar item.
   const [open, setOpen] = useState(() => !cfg().configured)
+  /** Which tab to show; the palette's "Set up" row asks for the Add-ons tab. */
+  const [section, setSection] = useState<SetupSection>("ai")
 
   useEffect(() => {
-    const show = () => setOpen(true)
+    const show = (event: Event) => {
+      const wanted = (event as CustomEvent<SetupSection>).detail
+      if (wanted) setSection(wanted)
+      setOpen(true)
+    }
     window.addEventListener(SETUP_EVENT, show)
     return () => window.removeEventListener(SETUP_EVENT, show)
   }, [])
@@ -83,19 +103,19 @@ export function SetupDialog() {
           <DialogTitle>Set up Corvoid Hub</DialogTitle>
           <DialogDescription>
             Point the app at your hub folder and Obsidian vault. An AI harness can do it for you, or
-            you fill the paths in yourself.
+            you fill the paths in yourself. Add-ons are optional.
           </DialogDescription>
         </DialogHeader>
-        <SetupBody onDone={() => setOpen(false)} />
+        <SetupBody key={section} onDone={() => setOpen(false)} initialTab={section} />
       </DialogContent>
     </Dialog>
   )
 }
 
-function SetupBody({ onDone }: { onDone: () => void }) {
+function SetupBody({ onDone, initialTab }: { onDone: () => void; initialTab: SetupSection }) {
   const [detect, setDetect] = useState<SetupDetect | null>(null)
   const [detectError, setDetectError] = useState<string | null>(null)
-  const [tab, setTab] = useState("ai")
+  const [tab, setTab] = useState<string>(initialTab)
   const [harnesses, setHarnesses] = useState<AiHarnessId[]>(["claude-code"])
   /** False when the user opened Setup later just to reconnect something. */
   const [needsSetup] = useState(() => !cfg().configured)
@@ -126,6 +146,7 @@ function SetupBody({ onDone }: { onDone: () => void }) {
         wasConfigured.current = true
         await reloadConfig()
         toast.success("Setup done")
+        void suggestNeedle()
         onDone()
       } catch {
         // A poll that fails changes nothing; the next one tries again.
@@ -148,6 +169,10 @@ function SetupBody({ onDone }: { onDone: () => void }) {
       <TabsList>
         <TabsTrigger value="ai">With an AI</TabsTrigger>
         <TabsTrigger value="manual">Manual</TabsTrigger>
+        <TabsTrigger value="addons">
+          <Sparkles />
+          Add-ons
+        </TabsTrigger>
       </TabsList>
 
       <TabsContent value="ai" className="pt-3">
@@ -162,6 +187,10 @@ function SetupBody({ onDone }: { onDone: () => void }) {
 
       <TabsContent value="manual" className="pt-3">
         <ManualSetup detect={detect} onDone={finish} />
+      </TabsContent>
+
+      <TabsContent value="addons" className="pt-3">
+        <AddonsSetup onDone={finish} />
       </TabsContent>
     </Tabs>
   )
@@ -304,6 +333,7 @@ function ManualSetup({ detect, onDone }: { detect: SetupDetect | null; onDone: (
       await reloadConfig()
       const created = result.created.length
       toast.success(created > 0 ? `Setup saved, ${created} starter items created` : "Setup saved")
+      void suggestNeedle()
       const connected = wired.filter((w) => w.ok && w.message !== "already connected")
       const failed = wired.filter((w) => !w.ok)
       if (connected.length > 0) {
@@ -417,6 +447,189 @@ function ManualSetup({ detect, onDone }: { detect: SetupDetect | null; onDone: (
       </DialogFooter>
     </div>
   )
+}
+
+/** Optional tab: the Needle add-on. Copy an install prompt, or take the two paths. Skipping is fine. */
+function AddonsSetup({ onDone }: { onDone: () => void }) {
+  const [status, setStatus] = useState<NeedleStatus | null>(null)
+  const [config, setConfig] = useState("")
+  const [python, setPython] = useState(() => cfg().needlePython ?? "")
+  const [weights, setWeights] = useState(() => cfg().needleWeights ?? "")
+  const [showPaths, setShowPaths] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  // An agent can write the two keys while this tab is open, so the dots are polled.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const next = await needleStatus()
+        if (!cancelled) setStatus(next)
+      } catch {
+        // The status is a hint; a failed poll changes nothing.
+      }
+    }
+    tick()
+    const timer = setInterval(tick, POLL_MS)
+    configPath()
+      .then((path) => {
+        if (!cancelled) setConfig(path)
+      })
+      .catch(() => {
+        // The prompt names a fallback file then.
+      })
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  const ready = isNeedleReady(status)
+
+  async function copyPrompt() {
+    try {
+      await copyText(buildNeedleSetupPrompt(config || "corvoid-hub.json"))
+      setCopied(true)
+      toast.success("Prompt copied. Paste it into your AI harness.")
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  async function savePaths() {
+    const file = python.trim()
+    const model = weights.trim()
+    if (!file || !model) {
+      toast.error("Pick the Python and the needle3.cact file")
+      return
+    }
+    setSaving(true)
+    try {
+      await needleConfigure(file, model)
+      // The new keys are in the config now; cfg() must see them (the palette and quick log read it).
+      await reloadConfig()
+      toast.success("Needle add-on saved")
+      setShowPaths(false)
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2 rounded-lg border p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Sparkles className="size-4 text-muted-foreground" />
+          <p className="text-sm font-medium">Needle</p>
+          {ready && (
+            <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              Ready
+            </span>
+          )}
+          <span className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <AddonDot ok={Boolean(status?.pythonFound)} label="Python" />
+              Python
+            </span>
+            <span className="flex items-center gap-1.5">
+              <AddonDot ok={Boolean(status?.weightsFound)} label="Model" />
+              Model
+            </span>
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Type commands in plain words in Ctrl+K, runs offline. It turns “add task fix login to
+          Corvogames” into the matching action, and every write is confirmed first.
+        </p>
+        {status?.error && <p className="text-xs text-destructive">{status.error}</p>}
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={copyPrompt} className="h-8">
+            {copied ? <Check /> : <Copy />}
+            {copied ? "Copy again" : "Set up with AI"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            onClick={() => setShowPaths((current) => !current)}
+          >
+            I have it
+          </Button>
+        </div>
+      </div>
+
+      {showPaths && (
+        <div className="flex flex-col gap-3 rounded-lg border border-dashed p-3">
+          <PathRow
+            label="Needle Python (its venv)"
+            value={python}
+            onChange={setPython}
+            onPick={() => pick("file", setPython)}
+            hint="…\venv\Scripts\python.exe"
+          />
+          <PathRow
+            label="Model weights"
+            value={weights}
+            onChange={setWeights}
+            onPick={() => pick("file", setWeights)}
+            hint="…\models\needle3.cact"
+          />
+          <div className="flex justify-end">
+            <Button size="sm" onClick={savePaths} disabled={saving} className="h-8">
+              {saving ? <Loader2 className="animate-spin" /> : <Save />}
+              {saving ? "Saving..." : "Use these"}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        Optional: skip it and everything else works as before. The model is Apache-2.0 by Cactus
+        Compute (huggingface.co/Cactus-Compute/needle3), about 35 MB, and nothing leaves the machine.
+      </p>
+      {config && <p className="truncate font-mono text-[10px] text-muted-foreground">{config}</p>}
+
+      <DialogFooter>
+        <Button variant="outline" onClick={onDone} className="h-9">
+          Skip
+        </Button>
+      </DialogFooter>
+    </div>
+  )
+}
+
+function AddonDot({ ok, label }: { ok: boolean; label: string }) {
+  const dark = useDark()
+  return (
+    <span
+      title={ok ? `${label} found` : `${label} not found`}
+      aria-label={ok ? `${label} found` : `${label} not found`}
+      className={cx("size-2 shrink-0 rounded-full", !ok && "bg-muted-foreground/40")}
+      style={ok ? { background: trendColor(1, dark) } : undefined}
+    />
+  )
+}
+
+/**
+ * One-time tip after setup: the palette also takes plain commands. The "Set up" action only shows
+ * while the add-on is not installed; the tip is remembered in localStorage.
+ */
+async function suggestNeedle(): Promise<void> {
+  if (needleTipSeen(NEEDLE_TIP_KEY)) return
+  rememberNeedleTip(NEEDLE_TIP_KEY)
+  let ready = false
+  try {
+    ready = isNeedleReady(await needleStatus())
+  } catch {
+    // Without a status the setup action is the safe choice.
+  }
+  toast.message("Tip: Ctrl+K understands plain commands with the Needle add-on", {
+    duration: 12000,
+    action: ready ? undefined : { label: "Set up", onClick: () => openSetup("addons") },
+  })
 }
 
 function harnessLabel(raw: string): string {

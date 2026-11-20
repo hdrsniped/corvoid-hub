@@ -9,11 +9,11 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { PageToolbar } from "@/components/page-toolbar"
 import { HarnessIcon } from "@/components/harness-icon"
 import { trendColor, useDark } from "@/core/colors"
-import { cfg } from "@/core/config"
 import { cx, shortDate } from "@/core/format"
 import { useLoad } from "@/core/hooks"
 import { parseLogBullet, type LogBullet, type LogKind } from "@/core/links"
 import { loadActivity, type ActivityData } from "@/core/stats"
+import { DATA_CHANGED_EVENT } from "@/core/needle-actions"
 import type { LogDay } from "@/core/vault"
 
 import { ActivityAreaChart } from "./ActivityAreaChart"
@@ -53,9 +53,8 @@ export function ActivityPage() {
   )
 
   // Ctrl+L opens quick log while this screen is mounted, the same shape as the palette's Ctrl+K.
-  // Both scripts come from corvoid-hub.json; without them quick log is off, not broken.
+  // Logging is built in, so the shortcut is always on.
   useEffect(() => {
-    if (!cfg().quickLog) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === "l" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault()
@@ -66,6 +65,12 @@ export function ActivityPage() {
     return () => window.removeEventListener("keydown", onKey)
   }, [])
 
+  // A palette command can write a log bullet while this screen is open.
+  useEffect(() => {
+    window.addEventListener(DATA_CHANGED_EVENT, reload)
+    return () => window.removeEventListener(DATA_CHANGED_EVENT, reload)
+  }, [reload])
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <PageToolbar>
@@ -73,22 +78,10 @@ export function ActivityPage() {
           <RefreshCw className={cx(loading && "animate-spin")} />
           Refresh
         </Button>
-        {cfg().quickLog ? (
-          <Button size="sm" onClick={() => setLogOpen(true)} title="Log work (Ctrl+L)">
-            <PenLine />
-            Log
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled
-            title='Quick log is off: set "vlog" and "needleLog" in corvoid-hub.json'
-          >
-            <PenLine />
-            Log
-          </Button>
-        )}
+        <Button size="sm" onClick={() => setLogOpen(true)} title="Log work (Ctrl+L)">
+          <PenLine />
+          Log
+        </Button>
       </PageToolbar>
 
       {loading && !data && (

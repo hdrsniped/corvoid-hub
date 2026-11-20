@@ -1,57 +1,72 @@
-import type { ProcessRun } from "./fs"
 import type { LogKind } from "./links"
+import type { Project } from "./types"
 
-/** What needle-log suggests: the project it picked, the kind it read from the sentence, and the text. */
-export interface QuickLogSuggestion {
-  project: string
-  kind: LogKind
-  text: string
-  /** Model confidence in [0, 1], or null when it reported none. */
-  confidence: number | null
-  /** False = a guess to check before logging (needle-log's exit 4 case). */
-  sure: boolean
-}
-
-/** needle-log's task words, used to guess the kind when it could not name a project. */
+/** Task words: what quick log reads as a finished task when there is no model. */
 const TASK_WORDS = /\b(finish(ed)?|done|complete(d)?|ship(ped)?|implement(ed)?|built|add(ed)?|launch(ed)?)\b/i
 
 export function guessKind(sentence: string): LogKind {
   return TASK_WORDS.test(sentence) ? "task" : "update"
 }
 
-/**
- * Reads the JSON line needle-log prints. Returns null when it printed no suggestion
- * (exit 3: it could not tell which project the work belongs to).
- */
-export function parseSuggestion(run: ProcessRun): QuickLogSuggestion | null {
-  for (const line of run.stdout.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith("{")) continue
-    try {
-      const raw = JSON.parse(trimmed) as Record<string, unknown>
-      const project = typeof raw.project === "string" ? raw.project.trim() : ""
-      if (!project) continue
-      const confidence =
-        typeof raw.confidence === "number" && Number.isFinite(raw.confidence) ? raw.confidence : null
-      return {
-        project,
-        kind: raw.kind === "task" ? "task" : "update",
-        text: typeof raw.text === "string" ? raw.text : "",
-        confidence,
-        sure: raw.sure === true,
-      }
-    } catch {
-      // Not the JSON line (a warning line, or the trailing hint text).
-    }
-  }
-  return null
+/** Letters and digits only, so "Prompt Lab" also matches "promptlab". */
+function squash(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "")
 }
 
-/** needle-log's own explanation (its last stdout line), used when it brings no suggestion. */
-export function runMessage(run: ProcessRun): string {
-  const lines = run.stdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("{"))
-  return lines.length > 0 ? lines[lines.length - 1] : run.stderr.trim()
+/**
+ * The project a sentence is about, guessed without a model: the longest project name (or the name
+ * without spaces and dashes) that appears in the sentence, case-insensitive. Otherwise the most
+ * recently updated active project, so the select always starts somewhere useful.
+ */
+export function guessProject(projects: Project[], sentence: string): string {
+  const said = sentence.toLowerCase()
+  const squashed = squash(sentence)
+  let best: { name: string; length: number } | null = null
+  for (const project of projects) {
+    const name = project.name.trim()
+    if (!name) continue
+    const lower = name.toLowerCase()
+    const compact = squash(name)
+    // The name as typed, or the same name without spaces and dashes ("promptlab").
+    const hit = said.includes(lower) || (compact !== lower && compact.length > 2 && squashed.includes(compact))
+    if (!hit) continue
+    const length = Math.max(name.length, compact.length)
+    if (!best || length > best.length) best = { name: project.name, length }
+  }
+  if (best) return best.name
+
+  const active = projects.filter((project) => project.status === "active")
+  const pool = active.length > 0 ? active : projects
+  return [...pool].sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? ""))[0]?.name ?? ""
+}
+
+/** Words that say little about which task was finished. */
+const STOP_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "was", "were", "has", "have",
+  "had", "not", "but", "you", "are", "its", "all", "any", "now", "then", "out", "off", "over",
+  "new", "some", "one", "two", "did", "does", "done", "just", "very", "well",
+])
+
+/** Lowercase words of three letters or more, without the stop words. */
+function words(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
+    (word) => word.length >= 3 && !STOP_WORDS.has(word)
+  )
+}
+
+/**
+ * The open task the log text most likely finishes: the most shared words, ties going to the longer
+ * task. "" when nothing overlaps.
+ */
+export function bestTaskMatch(tasks: string[], text: string): string {
+  const said = new Set(words(text))
+  let best = { task: "", score: 0, length: 0 }
+  for (const task of tasks) {
+    const score = words(task).filter((word) => said.has(word)).length
+    if (score === 0) continue
+    if (score > best.score || (score === best.score && task.length > best.length)) {
+      best = { task, score, length: task.length }
+    }
+  }
+  return best.task
 }

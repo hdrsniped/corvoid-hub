@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react"
-import { BookOpen, Copy, RefreshCw, Search } from "lucide-react"
+import { BookOpen, Copy, RefreshCw, Search, Sparkles, Terminal, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageToolbar } from "@/components/page-toolbar"
+import { openSetup } from "@/components/setup-dialog"
 import { TermIcon } from "@/components/term-icon"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +25,13 @@ import {
   type GlossaryTerm,
 } from "@/core/glossary"
 import { useRoute } from "@/core/navigation"
+import {
+  NEEDLE_GUIDE_KEY,
+  isNeedleReady,
+  needleTipSeen,
+  rememberNeedleTip,
+  useNeedleStatus,
+} from "@/core/needle"
 
 /** Every word of the query must appear in the term, its meaning or its example. */
 function matches(entry: GlossaryTerm, query: string): boolean {
@@ -107,6 +115,8 @@ function GuideContent({
         </div>
       </div>
 
+      <NeedleGuideCard />
+
       {loading && terms.length === 0 && (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {[0, 1, 2, 3].map((i) => (
@@ -151,6 +161,94 @@ function GuideContent({
         </div>
       )}
     </div>
+  )
+}
+
+/** Four plain sentences the add-on understands; clicking one copies it. */
+const NEEDLE_EXAMPLES = [
+  "add task fix login to Corvogames",
+  "log an update on Starfall: tuned the boss fight",
+  "set Corvogames to paused",
+  "back up now",
+]
+
+/**
+ * The Guide's compact card for plain-language commands: what they are, four examples and whether
+ * the optional add-on is ready. Dismissing it is remembered in localStorage.
+ */
+function NeedleGuideCard() {
+  const status = useNeedleStatus()
+  const [hidden, setHidden] = useState(() => needleTipSeen(NEEDLE_GUIDE_KEY))
+  if (hidden) return null
+
+  const ready = isNeedleReady(status.data)
+
+  async function copyExample(sentence: string) {
+    try {
+      await copyText(sentence)
+      toast.success("Copied the command")
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
+
+  return (
+    <Card size="sm" className="gap-3">
+      <CardHeader>
+        <CardTitle className="flex min-w-0 items-center gap-2">
+          <Terminal className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">Commands (Needle add-on)</span>
+          <span className="ml-auto flex items-center gap-2">
+            <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {ready ? "Ready" : "Not set up"}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Hide the commands card"
+              onClick={() => {
+                rememberNeedleTip(NEEDLE_GUIDE_KEY)
+                setHidden(true)
+              }}
+            >
+              <X />
+            </Button>
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2 text-sm text-muted-foreground">
+        <p>
+          Type a sentence in <span className="font-mono text-foreground">Ctrl K</span> and the app
+          turns it into the matching action. It runs offline, and every write is confirmed first.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {NEEDLE_EXAMPLES.map((sentence) => (
+            <button
+              key={sentence}
+              type="button"
+              title="Copy this command"
+              onClick={() => void copyExample(sentence)}
+              className="max-w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {sentence}
+            </button>
+          ))}
+        </div>
+      </CardContent>
+      <CardFooter className="mt-auto">
+        {ready ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Sparkles className="size-3.5" />
+            Needle is ready. Ask in Ctrl K.
+          </p>
+        ) : (
+          <Button size="sm" variant="outline" onClick={() => openSetup("addons")}>
+            <Sparkles />
+            Set up Needle
+          </Button>
+        )}
+      </CardFooter>
+    </Card>
   )
 }
 

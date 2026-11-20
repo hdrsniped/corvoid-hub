@@ -34,14 +34,16 @@ export interface AppConfig {
   autoBackup: "daily" | "weekly" | "off"
   /** How many backups are kept before the oldest are pruned (`keepBackups`, default 10). */
   keepBackups: number
-  vlog: string | null
-  needleLog: string | null
+  /** Python of the Needle add-on (its own venv), or null when the add-on is off (`needlePython`). */
+  needlePython: string | null
+  /** needle3.cact weights of the Needle add-on (`needleWeights`). */
+  needleWeights: string | null
   /** The config file that was read, or "defaults". */
   source: string
   /** True when a config file was found. Setup runs while this is false. */
   configured: boolean
-  /** True when both quick log scripts are configured. */
-  quickLog: boolean
+  /** True when both Needle keys are set (needle_status checks the files). */
+  needleConfigured: boolean
   hubExists: boolean
   vaultExists: boolean
 }

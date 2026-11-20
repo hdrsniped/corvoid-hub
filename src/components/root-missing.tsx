@@ -19,7 +19,7 @@ export function RootMissing({ root }: { root: "hub" | "vault" }) {
         Set your {root} path in Setup
         {c.source === "defaults" ? " (no config file found, so the default is used)" : ` (config: ${c.source})`}.
       </p>
-      <Button variant="outline" size="sm" className="mt-2" onClick={openSetup}>
+      <Button variant="outline" size="sm" className="mt-2" onClick={() => openSetup()}>
         <Settings2 />
         Open setup
       </Button>

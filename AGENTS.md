@@ -14,8 +14,9 @@ Desktop app (Tauri v2 + React + Vite + TypeScript + shadcn/ui) that is the UI fo
 ```
 src-tauri/src/lib.rs      Rust commands: get_config, list_dir, read_text, write_text, delete_file, run_hub_sync,
                           skill_install_git, copy_into_inbox, save_inbox_text, skill_roots, path_exists,
-                          resolve_path, skill_copy_to_hub, skill_transfer, skill_remove, quicklog_suggest,
-                          quicklog_commit, apply_locks, setup_detect, setup_save, setup_wire_rules, config_path,
+                          resolve_path, skill_copy_to_hub, skill_transfer, skill_remove, needle_status,
+                          needle_ask, needle_configure,
+                          log_entry, apply_locks, setup_detect, setup_save, setup_wire_rules, config_path,
                           harness_icon, backup_create, backup_list, backup_restore, backup_settings,
                           backup_adopt
                           Paths are not hardcoded: `Config` (RwLock, reloadable) comes from corvoid-hub.json (see
@@ -29,15 +30,23 @@ src-tauri/src/lib.rs      Rust commands: get_config, list_dir, read_text, write_
                           refuses an existing name or the same root); keep_original=false then moves the original
                           to <hub>\backups\removed-skills. skill_remove does the same for one folder and refuses
                           links/junctions ("managed by the hub, remove it from the hub instead").
-                          quicklog_suggest runs needle-log.ps1 with -DryRun, quicklog_commit runs vlog.ps1 with
-                          -Harness me (kind must be task|update, the project folder must be in Projects\), apply_locks
-                          runs bin\apply-locks.ps1. Those three run off the UI thread with -ExecutionPolicy Bypass
-                          and no console window. Missing scripts come back as a clear message, never a crash.
+                          needle_* is the optional Needle add-on: one lazy sidecar (addons/needle/needle_serve.py,
+                          started with the configured Python, no console window, killed on app exit) that answers
+                          a sentence with tool calls; needle_ask restarts it once after a crash and times out at
+                          15 s, needle_status reports the two files and the worker, needle_configure writes
+                          needlePython/needleWeights and stops the worker (None/None turns it off). log_entry is the
+                          built-in quick log writer (daily bullet, ticked task, new tasks, frontmatter; local date,
+                          locks checked), apply_locks runs bin\apply-locks.ps1. The two scripts run off the UI
+                          thread with -ExecutionPolicy Bypass and no console window. Missing scripts come back as a
+                          clear message, never a crash.
                           setup_* is first-run setup (see Setup below) and harness_icon reads the Antigravity icon
                           out of its exe. get_config reloads the config when the file on disk changed, so a setup
                           written by an agent is picked up without a restart. Logs go to <logDir> (default <hub>\.logs).
                           backup_* is the zip backup (see Backups below); it writes into backupDir, which may live
                           outside the hub and vault.
+addons/needle/            the optional add-on's sidecar: needle_serve.py (JSON lines on stdin/stdout) and
+                          smoke_test.py (sends three commands, prints the calls). Bundled via tauri.conf
+                          bundle.resources; a dev build falls back to this repo folder.
 src/core/                 shared: tauri wrappers (fs.ts), frontmatter parse/write (markdown.ts), types.ts,
                           config.ts (cfg() + loadConfig + reloadConfig/onConfigChange, nothing hardcoded)
 src/core/setup.ts         first-run setup: setup_detect, setup_save, setup_wire_rules, config_path + types
@@ -58,7 +67,12 @@ src/core/colors.ts        OKLCH palette: category, project (hash-shifted), fresh
 src/core/categories.ts    categories.yaml load/save (keeps header comments and unknown keys), slugs, farthest free hue
 src/core/locks.ts         locks.yaml load/save (header kept), path matching (lockAt/isLocked/lockOf), setLock +
                           apply_locks, assertUnlocked guard for saves, useLocks() for screens and sheets
-src/core/quicklog.ts      needle-log JSON suggestion parse (exit 0/3/4), kind guess, its no-project message
+src/core/quicklog.ts      built-in project/kind/task guesses for quick log (no model)
+src/core/needle.ts        Needle add-on wrappers (needle_status/ask/configure), the tool list (schema, sentence,
+                          confirm fields), looksLikeCommand, isNeedleReady, tip keys
+src/core/needle-actions.ts  what a call does: safe calls navigate, writes reuse saveProject/logEntry/setLock/
+                          skill_transfer/backupNow; notifyDataChanged() fires hub:data-changed
+src/core/needle-setup-prompt.ts  buildNeedleSetupPrompt: the plain-text install prompt for an AI harness
 src/core/harness.ts       harness ids (claude-code | antigravity | opencode | me | other) parsed from log bullets; isAiHarness()
 src/core/glossary.ts      glossary.yaml load/parse (list of {term, icon, means, say}), session cache, useGlossary(),
                           term(key) lookup by cv:x or x. Read-only: the app never writes this file.
@@ -67,8 +81,10 @@ src/core/backup.ts        backup_create/list/restore/settings/adopt wrappers, ba
 src/assets/hub-mark.svg   the app's own mark (hub: center node + 5 linked nodes). Source for the app icons. Uses currentColor.
 src/components/           shared UI pieces: harness-icon.tsx (HarnessIcon + HarnessGlyph), hub-mark.tsx (HubMark, HubMarkIcon),
                           lock-control.tsx (LockControl menu, LockBadge for card icon rows),
-                          command-palette.tsx (Ctrl+K search over projects/apps/skills/terms/screens + Setup + Back up now),
-                          setup-dialog.tsx (first-run Setup, both tabs, openSetup() event),
+                          command-palette.tsx (Ctrl+K search over projects/apps/skills/terms/screens + Setup + Back up now
+                          + plain-language commands when Needle is ready),
+                          setup-dialog.tsx (first-run Setup: With an AI / Manual / Add-ons, openSetup(section) event),
+                          needle-confirm.tsx (the confirm card of a command: editable fields, Confirm/Cancel),
                           chart-gradient.tsx (AreaGradients, areaFill, useChartId), category-badge.tsx,
                           category-chips.tsx (main badge + "+N" popover), progress-bar.tsx (thin bar),
                           page-toolbar.tsx (PageToolbar portal into the top bar), external-link-guard.tsx,
@@ -83,11 +99,14 @@ src/modules/activity/     ActivityPage (log + task/update filter), QuickLogDialo
                           StatsSection
 src/modules/skills/       SkillsPage (search, source filter, inbox), SkillSheet (Overview/Edit), SkillOverview (uses, file tree),
                           SkillEditor (frontmatter form), SkillActions (Move to + Remove), AddSkillDialog, SkillBits
-src/modules/guide/        GuidePage (glossary.yaml as compact cards, search, deep link ?term=cv:x)
+src/modules/hub/          HubPage (Rules, Packs, Categories, Locks, Backups, Add-ons tabs), CategoriesPanel,
+                          LocksPanel, BackupsPanel, AddonsPanel (Needle status, Set up, Test, Turn off)
+src/modules/guide/        GuidePage (glossary.yaml as compact cards, search, deep link ?term=cv:x, the dismissible
+                          "Commands (Needle add-on)" card)
 src/modules/registry.ts   the ONLY place modules are listed. Add/remove a screen = add/remove one line here.
 src/components/ui/        shadcn components (add with the shadcn CLI, don't hand-write)
 ```
-Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categories, Locks, Backups tabs), `skills`, `guide`.
+Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categories, Locks, Backups, Add-ons tabs), `skills`, `guide`.
 
 ## Guide and term hints
 - `<hub>\glossary.yaml` is the only vocabulary: a list of `{term: cv:x, icon: <lucide kebab-case>, means, say}`. The app reads it and never writes it. A missing file means no terms, not an error.
@@ -96,6 +115,7 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 - `TermHint term="cv:version"` renders a small muted (?) whose tooltip shows the term, `means` and `say`; it renders nothing when the glossary has no such term. Text always comes from glossary.yaml, never from a hardcoded string.
 - Hints sit beside: version (project card and sheet), Log mode (New project), Harness and Transfer, Categories, Locks (project sheet and Hub > Locks), Next/Done task headers, the Skills "Hub" filter, and the Apps toolbar ("App index").
 - The term icon comes from lucide's `icons` export via `TermIcon`, with `BookOpen` as fallback for an unknown name. Icons are never emoji or images.
+- Above the terms, the dismissible “Commands (Needle add-on)” card shows four example commands (click one to copy), the add-on status and a Set up button (`openSetup("addons")`); its flag is `NEEDLE_GUIDE_KEY`.
 
 ## Project note model (tasks and versions)
 - `version` is a whole number in the frontmatter, default 1 when missing.
@@ -129,12 +149,24 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 - Toast after a transfer: `Transfer prompt copied. Paste it into <harness>.`
 
 ## Quick log (Ctrl+L)
-- Activity toolbar → `Log` (`PenLine`) or Ctrl+L opens `src/modules/activity/QuickLogDialog.tsx` (the shortcut is registered while the Activity screen is mounted). Without `vlog` and `needleLog` in corvoid-hub.json the button is disabled with the reason and no shortcut is registered (`cfg().quickLog`).
-- One sentence → `quicklog_suggest` runs `needle-log.ps1 "<sentence>" -DryRun`. It prints one JSON line `{project, kind, text, harness, confidence, sure}`; exit 3 = it could not tell the project, exit 4 = a low-confidence suggestion. The model takes a few seconds, so the Suggest button shows a spinner.
-- The check row: project select (every project, project color dot, prefilled by needle-log), kind toggle `task`/`update` (prefilled), editable text, and — for `task` only — a "finishes task" select of that project's open `## Next` items, sent as `-Task`.
-- `sure: false` shows a muted "check this" hint with the confidence; nothing is ever committed automatically.
-- Exit 3 leaves the project select empty (the hardcoded sentence stays in the text) and shows needle-log's own message as the hint.
-- Log → `quicklog_commit(project, kind, text, task)` runs `vlog.ps1` with `-Harness me`, toasts vlog's message and reloads Activity. Rust refuses any kind but `task`/`update` and any project that has no folder under `Projects\`.
+- Activity toolbar → `Log` (`PenLine`) or Ctrl+L opens `src/modules/activity/QuickLogDialog.tsx` (the shortcut is registered while the Activity screen is mounted). Logging is built in, so it is always on; only the optional Needle `Fill` button needs the add-on.
+- One box: the sentence, plus a project select (color dots), a kind toggle `task`/`update`, a harness select (icon + name, default `me`), a "finishes task" select for `task` and an optional "Next step" field (the note's `next`).
+- Project and kind are guessed as you type, without a model: `guessProject` (`core/quicklog.ts`) picks the longest project name, or the name without spaces and dashes, that appears in the sentence (else the most recently updated active project); `guessKind` reads the task words (finish/done/complete/ship/implement/built/add/launch). The task select is preselected with `bestTaskMatch`, the open `## Next` item with the most shared words. Picking a project, kind or task by hand wins over the guess.
+- The sparkles `Fill` button appears only when the add-on is ready (`isNeedleReady(needleStatus)`): it asks the sidecar with `log_work` only (`buildTools(ctx, ["log_work"])`) and fills project, kind, text and next from the first call (confident or held). A project that is not in the vault is not applied; the hint says so. Without the add-on the built-in guess stands and nothing is ever written automatically.
+- Log → `log_entry(project, kind, text, harness, task, next, add)` in Rust, which writes the vault itself (no script). It refuses any kind but `task`/`update`, any harness but `claude code`/`antigravity`/`opencode`/`me`, a project name with separators or `..`, and a project with no `Projects\<Name>\<Name>.md`. It also checks `locks.yaml` and refuses a note or log under a read-only or no-ai lock.
+- What it writes, exactly as vlog.ps1 did: the daily `Log\YYYY-MM-DD.md` (local date, created with `---\ntype: log\ndate: <d>\n---\n\n## Done today\n` when missing) gets `- [[Projects/<P>/<P>|<P>]] — #<kind> <text> (<harness>)` (em dash) after a newline; for `task`, the first open `## Next` item (`- [ ] x` or `- x`) whose text contains the task words (else the log text) moves with its indented sub-lines to the end of `## Done` as `- [x] x` (`## Done` is created after Next when missing); `add` appends `- [ ] t` to `## Next`. Frontmatter gets `updated: <today>`, `harness: <harness>` and `next: "<next>"` (`"` becomes `'`), inserted before the closing `---` when missing. Files are UTF-8 without BOM and LF.
+- It returns `{message, ticked}`: `logged #task to <date>; ticked: X`, `…; no matching open task (log only)`, `…; added N task(s)`. The toast shows it and Activity reloads.
+
+## Needle add-on (plain-language commands)
+- Optional and off by default. Two config keys: `needlePython` (its own venv) and `needleWeights` (`needle3.cact`). `needle_status` answers `{configured, pythonFound, weightsFound, running, error}`; `isNeedleReady` means configured and both files exist.
+- The sidecar (`addons/needle/needle_serve.py`, our own code) is started lazily by Rust on the first command and killed on app exit. It ships through `bundle.resources` (a dev build reads `<repo>\addons\needle`). Rust never uses a shell: `python -I needle_serve.py --weights <path>`, hidden console, `CACTUS_TELEMETRY=0`, `HF_HUB_OFFLINE=1`; the script puts the engine cache next to the weights (`XDG_CACHE_HOME`, `HF_HOME`). No network once the weights are on disk.
+- Protocol: one JSON line in `{"id", "text", "tools": [...]}`, one JSON line out `{"id", "calls": [{name, arguments}], "held": [...], "confidence", "ms"}` or `{"id", "error"}`. The model loads once and is rebuilt only when the tools list hash changes. `needle_ask` waits 15 s and restarts the worker once after a crash or timeout.
+- Tools, with enums filled from live data (`core/needle.ts` → `buildTools`): `filter_projects(status?, category?)`, `open_project(project)`, `add_task(project, task)`, `log_work(project, kind task|update, text, next?)`, `set_next(project, next)`, `set_status(project, status)`, `start_version(project)`, `backup_now()`, `lock_folder(path, mode)`, `go_to(screen)`, `open_skill(skill)`, `move_skill(skill, target hub|claude|antigravity)`, `open_app(app)`.
+- **Writes are always confirmed.** Safe calls (`filter_projects`, `open_project`, `go_to`, `open_skill`, `open_app`) run on Enter. Every other call opens `NeedleConfirm` (`components/needle-confirm.tsx`) with editable fields (selects for enums, inputs for text) and Confirm/Cancel; several calls confirm together. A held result (`suppressed_calls`) shows greyed as “Did you mean…” and still needs confirm. Writes reuse the screens' functions: `saveProject`, `logEntry`, `setLock`, `skillTransfer` (+ hub-sync), `backupNow`; a change fires `hub:data-changed` so an open screen reloads.
+- Ctrl+K: placeholder “Search, or type a command…”, a Sparkles “Needle” chip while ready, and `looksLikeCommand` (two or more words with a verb) asks after 400 ms or on Tab. The Action group sits first and shows 1–2 preview rows. Without the add-on a command-looking sentence shows one muted “Commands need the Needle add-on · Set up” row that opens Setup → Add-ons (`openSetup("addons")`).
+- Discoverability (all dismissible, remembered in localStorage with try/catch in `core/needle.ts`): a one-time toast after setup (“Tip: Ctrl+K understands plain commands with the Needle add-on”, with Set up while it is not installed), the Guide card “Commands (Needle add-on)” with four examples and status, and a Sparkles dot on the sidebar Search button until the palette is opened once while ready.
+- Hub → **Add-ons** tab (`modules/hub/AddonsPanel.tsx`): status dots, Set up (Setup's Add-ons tab), Test (runs `open <first project>` and shows the parsed call) and Turn off (`needle_configure(null, null)` removes both keys and stops the worker).
+- Setup → **Add-ons** tab: the Needle card, “Set up with AI” (`buildNeedleSetupPrompt(configPath)` → venv, `pip install cactus-compute`, the weights from Hugging Face, cache/env, then write both keys and ask first) and “I have it” (two file pickers + `needle_configure`). Skipping is fine.
 
 ## Locks
 - `<hub>\locks.yaml`: header comments, then `- path: <abs path>` / `  mode: read-only|no-ai`. `core/locks.ts` keeps the header on save (same approach as categories.yaml) and writes a header-only file when there are no entries.
@@ -156,7 +188,8 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 ## Command palette (Ctrl+K)
 - `src/components/command-palette.tsx`, shadcn `Command` dialog (`bunx shadcn@latest add command` also adds `ui/input-group.tsx` and the `cmdk` dependency). It searches projects, apps, skills, glossary terms and screens in one list; Enter opens the item. The "App" group also holds Setup and **Back up now** (writes a backup at once). The sidebar footer shows the `Ctrl K` hint and opens it too (`openCommandPalette()` fires a window event, so nothing is lifted into the shell).
 - Opening an item is a hash deep link, parsed with `core/navigation.ts`: `#/projects?open=<name>` (project sheet), `#/skills?skill=<key>` (skill sheet), `#/apps?focus=<name>` (scrolls to the card and rings it), `#/guide?term=cv:x` (Guide filtered to that term), `#/<route>` (screen). The screen derives its open item from the query, and closing the sheet calls `navigate()` to drop the query, so no open item is stored twice.
-- The palette loads through the same loaders as the screens (projects, apps, skills, glossary) and caches them for a minute; a source that fails to load is skipped with a toast.
+- The palette loads through the same loaders as the screens (projects, apps, skills, categories, glossary) and caches them for a minute; a source that fails to load is skipped with a toast.
+- With the Needle add-on ready the palette also takes a sentence: the Sparkles “Needle” chip sits in the input, `looksLikeCommand` starts a 400 ms debounce (Tab asks at once), and the first group is **Action** with 1–2 preview rows (`callSentence`). Selecting a safe row runs it; a write row opens `NeedleConfirm` with every write call of that answer, so multi-call results confirm together. A command-looking sentence without the add-on shows one muted “Commands need the Needle add-on · Set up” row.
 
 ## App icon
 - `src/assets/hub-mark.svg` is the source. To regenerate: render it to a 1024px PNG (a dark rounded square with the mark nested in it; `@resvg/resvg-js` in a scratch folder, output `app-icon.png` in this folder), then run `bunx tauri icon app-icon.png` here. That writes `src-tauri/icons`. Run `cargo check -j 2` in `src-tauri` afterwards.
@@ -182,8 +215,8 @@ The three folders are allowed roots in Rust (`skill_roots`). `loadSkillIndex` (c
 
 ## Config (corvoid-hub.json)
 - Nothing is hardcoded. Rust `Config` (`RwLock`, reloadable) reads the first file it finds: `CORVOID_HUB_CONFIG`, then `corvoid-hub.json` next to the executable, then `%USERPROFILE%\.corvoid-hub.json`. No file = defaults; a broken file is logged (`logWarn`) and the defaults are used.
-- Keys: `hub` (default `%USERPROFILE%\ai-hub`), `vault` (default `%USERPROFILE%\Documents\Vortex`), `claudeSkills` (default `%USERPROFILE%\.claude\skills`), `antigravitySkills` (default `%USERPROFILE%\.gemini\config\skills`), `opencodeConfig` (default `%USERPROFILE%\.config\opencode`), `antigravityExe` (default: the first existing of `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe` and `%ProgramFiles%\Antigravity\Antigravity.exe`), `vlog` and `needleLog` (optional; without both, quick log is off with a clear message), `logDir` (default `<hub>\.logs`), `backupDir` (default `<hub>\backups\corvoid`), `autoBackup` (daily | weekly | off, default daily), `keepBackups` (default 10). `corvoid-hub.example.json` is the template; README documents each key.
-- Derived: `<hub>\{skills,inbox,packs}`, `<hub>\hub-sync.ps1`, `<hub>\bin\apply-locks.ps1`; `<vault>\Projects`, `<vault>\Log`. `get_config()` returns all of them plus the harness folders, `source` (the file that was read, or "defaults"), `configured` (a config file was found), `quickLog`, `hubExists` and `vaultExists`.
+- Keys: `hub` (default `%USERPROFILE%\ai-hub`), `vault` (default `%USERPROFILE%\Documents\Vortex`), `claudeSkills` (default `%USERPROFILE%\.claude\skills`), `antigravitySkills` (default `%USERPROFILE%\.gemini\config\skills`), `opencodeConfig` (default `%USERPROFILE%\.config\opencode`), `antigravityExe` (default: the first existing of `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe` and `%ProgramFiles%\Antigravity\Antigravity.exe`), `needlePython` + `needleWeights` (optional: the Needle add-on's Python and `needle3.cact`; a lone `needleLog` from an older config is ignored), `logDir` (default `<hub>\.logs`), `backupDir` (default `<hub>\backups\corvoid`), `autoBackup` (daily | weekly | off, default daily), `keepBackups` (default 10). A `vlog` key from an older config is ignored. `corvoid-hub.example.json` is the template; README documents each key.
+- Derived: `<hub>\{skills,inbox,packs}`, `<hub>\hub-sync.ps1`, `<hub>\bin\apply-locks.ps1`; `<vault>\Projects`, `<vault>\Log`. `get_config()` returns all of them plus the harness folders, `source` (the file that was read, or "defaults"), `configured` (a config file was found), `needlePython`/`needleWeights`, `needleConfigured` (both keys set), `hubExists` and `vaultExists`.
 - `get_config` calls `refresh_if_changed()`: if the file on disk is not the loaded one or is newer, the config is reloaded. That is how Setup's 2 s poll notices a config an agent just wrote.
 - `src/core/config.ts` loads it once (`loadConfig()` awaited in `main.tsx` before the first render) and every screen uses `cfg()`. `reloadConfig()` (after setup) notifies `onConfigChange` subscribers; `AppShell` bumps a key so the open screen remounts on the new roots. Never add a path constant back.
 - A screen declares `needs: "hub" | "vault"` in its `index.ts`; `app-shell.tsx` renders `RootMissing` (components/root-missing.tsx, one sentence plus an **Open setup** button) instead of the page when that folder is not on disk. Loaders also tolerate a missing `skills\` or `inbox\` folder.
@@ -193,8 +226,9 @@ The three folders are allowed roots in Rust (`skill_roots`). `loadSkillIndex` (c
 - **With an AI** (default tab): `ToggleGroup` of the three harness logos, a collapsed read-only preview of the prompt, a big **Copy prompt** button, then a spinner and "Waiting for setup…" while `get_config` is polled every 2 s. When `configured` turns true: toast "Setup done", close, `reloadConfig()`.
 - The prompt (`core/setup-prompt.ts` → `buildSetupPrompt`, plain text, no `cv:` words) says what the app is, lists every path from `setup_detect` (so the agent does not guess), and walks it through: confirm hub/vault, write the config with the five keys, create the hub starters and the vault `Projects`/`Log`/`Templates/Project.md`, then wire the rules into the chosen harnesses (Claude Code `@<hub>\AGENTS.md` in CLAUDE.md, OpenCode `instructions` entry, Antigravity plugin folder), backing up every file first.
 - **Manual** tab: one row per path (status dot, label, input, native picker; a select of `obsidianVaults` for the vault), checkboxes "Create starter files" and "Connect global rules to my harnesses", and Save.
+- **Add-ons** tab (optional, can be skipped): the Needle card with one line of what it does, Python/model status dots polled every 2 s, **Set up with AI** (`core/needle-setup-prompt.ts` → `buildNeedleSetupPrompt(config_path)`: venv, `pip install cactus-compute`, weights from Hugging Face, offline env, then write `needlePython`/`needleWeights` and ask first) and **I have it** (two file pickers → `needle_configure`). `openSetup("addons")` opens it on that tab.
 - `setup_detect()` is read-only: the six paths with `{path, exists}`, `obsidianVaults` from `%APPDATA%\obsidian\obsidian.json` (`vaults.*.path`, errors ignored), `configPath`, `configured`.
-- `setup_save(fields, createStarters)` merges into the existing config (keeps `vlog`, `needleLog`, `logDir`, `backupDir`, `autoBackup`, `keepBackups`), writes it at `config_target_path()` (env var, else the file in use, else `%USERPROFILE%\.corvoid-hub.json`), creates hub and vault, and copies missing starters from `examples/` (`include_str!`): hub `AGENTS.md`, `categories.yaml`, `glossary.yaml`, `apps.yaml`, `locks.yaml`, `skills/`, `packs/`; vault `Projects/`, `Log/`, `Templates/Project.md`. Existing files are never overwritten. Then it reloads the config.
+- `setup_save(fields, createStarters)` merges into the existing config (keeps `needlePython`, `needleWeights`, `logDir`, `backupDir`, `autoBackup`, `keepBackups`), writes it at `config_target_path()` (env var, else the file in use, else `%USERPROFILE%\.corvoid-hub.json`), creates hub and vault, and copies missing starters from `examples/` (`include_str!`): hub `AGENTS.md`, `categories.yaml`, `glossary.yaml`, `apps.yaml`, `locks.yaml`, `skills/`, `packs/`; vault `Projects/`, `Log/`, `Templates/Project.md`. Existing files are never overwritten. Then it reloads the config.
 - `setup_wire_rules(harnesses)` only touches a harness whose folder exists, backs up each edited file as `<name>.bak-YYYYMMDD-HHMMSS` next to it, and is idempotent: an import line, `instructions` entry or plugin folder that is already there is left alone (jsonc comments are stripped before reading). Antigravity gets `<antigravitySkills>\..\plugins\corvoid-hub\` with `plugin.json` and `rules/AGENTS.md`; that copy is re-copied by the agent whenever the rules change.
 
 ## Skill intake (the key workflow)

@@ -66,8 +66,12 @@ function CommandDialog({
 
 function CommandInput({
   className,
+  trailing,
   ...props
-}: React.ComponentProps<typeof CommandPrimitive.Input>) {
+}: React.ComponentProps<typeof CommandPrimitive.Input> & {
+  /** A small chip or hint on the right side of the field (for example the Needle label). */
+  trailing?: React.ReactNode
+}) {
   return (
     <div data-slot="command-input-wrapper" className="p-1 pb-0">
       <InputGroup className="h-8! rounded-lg! border-input/30 bg-input/30 shadow-none! *:data-[slot=input-group-addon]:pl-2!">
@@ -79,6 +83,11 @@ function CommandInput({
           )}
           {...props}
         />
+        {trailing && (
+          <InputGroupAddon align="inline-end" className="px-1.5!">
+            {trailing}
+          </InputGroupAddon>
+        )}
         <InputGroupAddon>
           <SearchIcon className="size-4 shrink-0 opacity-50" />
         </InputGroupAddon>
