@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   ChevronDown,
   Copy,
@@ -83,6 +83,8 @@ interface ProjectEditorProps {
   categories: Category[]
   onSaved: () => void
   onCategoriesChanged: () => void
+  /** `#/projects?open=Name&tab=tasks`: scroll the Next list into view ("what's left on Name"). */
+  focusTasks?: boolean
 }
 
 /**
@@ -94,10 +96,12 @@ export function ProjectEditor({
   categories,
   onSaved,
   onCategoriesChanged,
+  focusTasks = false,
 }: ProjectEditorProps) {
   const { project } = record
   const dark = useDark()
   const { locks, set: setLock } = useLocks(onSaved)
+  const tasksRef = useRef<HTMLDivElement>(null)
   const body = useMemo(() => splitBody(record.note.body), [record.note.body])
   const [status, setStatus] = useState<ProjectStatus>(project.status)
   const [picked, setPicked] = useState<string[]>(project.categories)
@@ -126,6 +130,12 @@ export function ProjectEditor({
   )
   /** The project's own folder in the vault: `Projects/<Name>`. */
   const vaultFolder = `${cfg().projects}\\${project.name}`
+
+  // A "what's left on X" answer opens the sheet on the task lists, not on the top fields.
+  useEffect(() => {
+    if (!focusTasks) return
+    tasksRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
+  }, [focusTasks, project.name])
 
   async function save(startNextVersion = false) {
     setSaving(true)
@@ -297,37 +307,45 @@ export function ProjectEditor({
           <ProgressBar value={pct} color={accent} />
         </section>
 
-        <TaskList
-          title="Next"
-          hint={<TermHint term="cv:task" />}
-          items={todo}
-          empty="No open tasks."
-          onToggle={finish}
-          onRemove={(i) => setTodo(todo.filter((_, j) => j !== i))}
-          footer={
-            <form
-              className="flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault()
-                addTask()
-              }}
-            >
-              <Input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="Add a task"
-              />
-              <Button
-                type="submit"
-                variant="outline"
-                size="icon"
-                aria-label="Add task"
+        <div
+          ref={tasksRef}
+          className={cx(
+            "scroll-mt-4 rounded-lg",
+            focusTasks && "-mx-2 px-2 py-1 ring-1 ring-ring/30"
+          )}
+        >
+          <TaskList
+            title="Next"
+            hint={<TermHint term="cv:task" />}
+            items={todo}
+            empty="No open tasks."
+            onToggle={finish}
+            onRemove={(i) => setTodo(todo.filter((_, j) => j !== i))}
+            footer={
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  addTask()
+                }}
               >
-                <Plus />
-              </Button>
-            </form>
-          }
-        />
+                <Input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Add a task"
+                />
+                <Button
+                  type="submit"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Add task"
+                >
+                  <Plus />
+                </Button>
+              </form>
+            }
+          />
+        </div>
 
         <TaskList
           title="Done"

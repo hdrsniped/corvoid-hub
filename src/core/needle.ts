@@ -67,20 +67,49 @@ export function needleStatus(): Promise<NeedleStatus> {
   return invoke<NeedleStatus>("needle_status")
 }
 
+/** The ask in flight, so two effects that fire at once never start (or queue) two sidecar calls. */
+let pendingAsk: { key: string; promise: Promise<NeedleResult> } | null = null
+
 /**
  * Asks Needle for tool calls. Rust keeps one sidecar process, answers within 15 s and restarts it
  * once when it died. `tools` is the live schema list from `buildTools`.
+ *
+ * With `ctx` every call is grounded against the sentence first (`groundResult`): an argument the
+ * user never said is dropped, and a call that loses its required argument is not shown at all.
+ * Two identical asks that overlap share one request, so the worker is never started twice.
  */
-export function needleAsk(text: string, tools: NeedleTool[]): Promise<NeedleResult> {
-  return invoke<NeedleResult>("needle_ask", { text, tools })
+export function needleAsk(
+  text: string,
+  tools: NeedleTool[],
+  ctx?: NeedleContext
+): Promise<NeedleResult> {
+  const key = text.trim()
+  if (pendingAsk && pendingAsk.key === key) return pendingAsk.promise
+  const promise = invoke<NeedleResult>("needle_ask", { text: key, tools }).then((result) =>
+    ctx ? groundResult(key, result, ctx) : result
+  )
+  pendingAsk = { key, promise }
+  const clear = () => {
+    if (pendingAsk?.promise === promise) pendingAsk = null
+  }
+  promise.then(clear, clear)
+  return promise
 }
+
+/** The setup write in flight: the dialog's two buttons must not write (or restart) twice. */
+let pendingConfigure: Promise<void> | null = null
 
 /**
  * Writes needlePython / needleWeights into corvoid-hub.json (null removes both, which turns the
  * add-on off) and stops the worker, so the next command uses the new paths.
  */
 export function needleConfigure(python: string | null, weights: string | null): Promise<void> {
-  return invoke<void>("needle_configure", { python, weights })
+  if (pendingConfigure) return pendingConfigure
+  const promise = invoke<void>("needle_configure", { python, weights }).finally(() => {
+    if (pendingConfigure === promise) pendingConfigure = null
+  })
+  pendingConfigure = promise
+  return promise
 }
 
 /** True when both files are configured and on disk: commands can be asked. */
@@ -189,6 +218,14 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: "open_project",
     label: "Open project",
     description: "Open one project's note and tasks.",
+    icon: FolderKanban,
+    safe: true,
+    fields: [{ key: "project", label: "Project", kind: "project" }],
+  },
+  {
+    name: "project_overview",
+    label: "Project overview",
+    description: "Show the open tasks and progress of a project.",
     icon: FolderKanban,
     safe: true,
     fields: [{ key: "project", label: "Project", kind: "project" }],
@@ -383,6 +420,8 @@ export function callSentence(call: NeedleCall): string {
     }
     case "open_project":
       return `Open ${project || "a project"}`
+    case "project_overview":
+      return `Show what's left on ${project || "a project"}`
     case "add_task":
       return `Add task "${text(a.task)}" to ${project || "a project"}`
     case "log_work": {
@@ -442,4 +481,199 @@ export function lockModeOf(value: unknown): LockMode {
 export function statusOf(value: unknown, fallback: ProjectStatus): ProjectStatus {
   const said = text(value) as ProjectStatus
   return PROJECT_STATUSES.includes(said) ? said : fallback
+}
+
+// ---------------------------------------------------------------------------------------------
+// Grounding. Needle fills every argument it can, so a question about one project used to come back
+// as "Show idea projects in automation". A call may only use what the sentence actually says: an
+// argument the user never said is dropped, and a call that loses a required argument is not shown.
+// ---------------------------------------------------------------------------------------------
+
+/** Lowercase words only, so "AI-Tooling" and "ai tooling" compare equal. */
+function fold(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+}
+
+/** True when the phrase is said in the input, letter by letter with the spaces removed. */
+export function says(input: string, phrase: string): boolean {
+  const target = fold(phrase)
+  if (!target) return false
+  const said = fold(input)
+  if (` ${said} `.includes(` ${target} `)) return true
+  return said.replace(/ /g, "").includes(target.replace(/ /g, ""))
+}
+
+/** A project, skill or app name: whole, without spaces, or one word of four or more letters. */
+export function mentionsName(input: string, name: string): boolean {
+  const target = fold(name)
+  if (!target) return false
+  if (says(input, name)) return true
+  return target.split(" ").some((word) => word.length >= 4 && says(input, word))
+}
+
+/** The longest name the input mentions, so "Corvoid Commerce Hub" wins over a shorter project. */
+export function mentionsAnyName(input: string, names: string[]): string | null {
+  const matches = names.filter((name) => mentionsName(input, name))
+  if (matches.length === 0) return null
+  return matches.reduce((best, name) => (fold(name).length > fold(best).length ? name : best))
+}
+
+/** An enum value (status, category, kind, screen, mode, target): the value, its label or one word of it. */
+function mentionsValue(
+  input: string,
+  kind: ToolFieldKind,
+  value: string,
+  ctx: NeedleContext
+): boolean {
+  const labels = [value, optionLabel(kind, value)]
+  if (kind === "category") {
+    const category = (ctx.categories ?? []).find((c) => c.slug === value)
+    if (category) labels.push(category.name)
+  }
+  return labels.some((label) => {
+    if (says(input, label)) return true
+    // "game-dev" also counts when the sentence says just "game".
+    return fold(label)
+      .split(" ")
+      .some((part) => part.length >= 3 && says(input, part))
+  })
+}
+
+/** Free text (task, text, next): kept only when at least half of its words are in the input. */
+function mentionsText(input: string, value: string): boolean {
+  const parts = fold(value).split(" ").filter(Boolean)
+  if (parts.length === 0) return false
+  const hits = parts.filter((part) => says(input, part)).length
+  return hits * 2 >= parts.length
+}
+
+/** A path counts only when it is in the input as typed. */
+function mentionsPath(input: string, value: string): boolean {
+  const target = fold(value)
+  return target !== "" && fold(input).replace(/ /g, "").includes(target.replace(/ /g, ""))
+}
+
+/** True when the sentence supports this argument. */
+function argumentSaid(
+  input: string,
+  field: ToolField,
+  value: string,
+  ctx: NeedleContext
+): boolean {
+  switch (field.kind) {
+    case "project":
+    case "skill":
+    case "app":
+      return mentionsName(input, value)
+    case "status":
+    case "category":
+    case "kind":
+    case "screen":
+    case "mode":
+    case "target":
+      return mentionsValue(input, field.kind, value, ctx)
+    case "text":
+      return field.key === "path" ? mentionsPath(input, value) : mentionsText(input, value)
+  }
+}
+
+/** Keeps only the calls (and arguments) the sentence supports. */
+export function groundCalls(input: string, calls: NeedleCall[], ctx: NeedleContext): NeedleCall[] {
+  const out: NeedleCall[] = []
+  for (const call of calls) {
+    const spec = toolSpec(call.name)
+    if (!spec) continue
+    const raw = call.arguments ?? {}
+    const kept: Record<string, unknown> = {}
+    let usable = true
+    for (const field of spec.fields) {
+      const value = text(raw[field.key])
+      if (!value) {
+        // A required argument the model left out makes the call unusable; an optional one stays out.
+        if (!field.optional) usable = false
+        continue
+      }
+      if (argumentSaid(input, field, value, ctx)) {
+        kept[field.key] = raw[field.key]
+      } else if (!field.optional) {
+        usable = false
+        break
+      }
+    }
+    // "Filter projects" with no grounded filter is just the projects screen: not an action.
+    if (usable && call.name === "filter_projects" && Object.keys(kept).length === 0) usable = false
+    if (usable) out.push({ name: call.name, arguments: kept })
+  }
+  return out
+}
+
+/** Grounds a whole answer. Held calls are also dropped below confidence 0.05. */
+export function groundResult(
+  input: string,
+  result: NeedleResult,
+  ctx: NeedleContext
+): NeedleResult {
+  const confidence = result.confidence
+  const heldUsable = confidence === null || confidence >= 0.05
+  return {
+    ...result,
+    calls: groundCalls(input, result.calls, ctx),
+    held: heldUsable ? groundCalls(input, result.held, ctx) : [],
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Questions. Only commands go to Needle; a question about a project is answered by the app itself.
+// ---------------------------------------------------------------------------------------------
+
+/** Sentences that end with "?" or open with a question word. */
+const QUESTION_START =
+  /^(what|whats|why|how|hows|when|where|which|who|whom|whose|is|are|can|could|does|do|did|should|will|would|any)\b/i
+
+export function looksLikeQuestion(input: string): boolean {
+  const said = input.trim()
+  if (!said) return false
+  if (said.endsWith("?")) return true
+  return QUESTION_START.test(said)
+}
+
+/** Question shapes that ask for a project's state ("what's left on X", "X status", "show X tasks"). */
+const OVERVIEW_FORMS: RegExp[] = [
+  /^(?:what(?:'s|s| is| are)?|anything)\s+(?:left|next|remaining|todo|to do|still)\b/i,
+  /^what(?:'s|s| is)?\s+(?:the\s+)?(?:status|progress|tasks|todos)\b/i,
+  /^how(?:'s|s| is| are)?\s+.+\s+(?:going|doing)\b/i,
+  /^(?:show|list|tell me about|give me)\s+.+\s+(?:tasks|todos|status|progress|left|next)\b/i,
+  /\b(?:status|tasks|todos|progress)\s*$/i,
+]
+
+/**
+ * The project a question asks about, or null. This is the built-in answer that runs before (and
+ * instead of) Needle, so "what's left on Corvogames" never becomes a filter command.
+ */
+export function projectQuestion(input: string, projectNames: string[]): string | null {
+  const said = input.trim().replace(/[?!.]+$/, "")
+  if (!said) return null
+  if (!OVERVIEW_FORMS.some((form) => form.test(said))) return null
+  return mentionsAnyName(said, projectNames)
+}
+
+const FILTER_START = /^(show|list|filter|find|which)\b/i
+
+/**
+ * A "show paused projects" / "show me ai tooling stuff" filter built without the model: only the
+ * status or category words the sentence actually contains, from the live lists. Never invents one.
+ */
+export function builtinProjectFilter(input: string, ctx: NeedleContext): NeedleCall | null {
+  const said = input.trim()
+  if (!said || looksLikeQuestion(said) || !FILTER_START.test(said)) return null
+  const args: Record<string, string> = {}
+  const status = PROJECT_STATUSES.find((value) => mentionsValue(said, "status", value, ctx))
+  if (status) args.status = status
+  // The longest category first, so "game dev" wins over a slug that merely shares a word.
+  const category = (ctx.categories ?? [])
+    .map((c) => c.slug)
+    .sort((a, b) => fold(b).length - fold(a).length)
+    .find((slug) => mentionsValue(said, "category", slug, ctx))
+  if (category) args.category = category
+  return Object.keys(args).length > 0 ? { name: "filter_projects", arguments: args } : null
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AppWindow,
   ArchiveRestore,
+  Filter,
   FolderKanban,
   Loader2,
   Plus,
@@ -36,12 +37,15 @@ import {
   NEEDLE_DOT_KEY,
   NEEDLE_SEEN_EVENT,
   buildTools,
+  builtinProjectFilter,
   callSentence,
   isNeedleReady,
   looksLikeCommand,
+  looksLikeQuestion,
   needleAsk,
   needleStatus,
   needleTipSeen,
+  projectQuestion,
   rememberNeedleTip,
   toolSpec,
   type NeedleCall,
@@ -117,6 +121,8 @@ export function CommandPalette() {
   const [confirm, setConfirm] = useState<NeedleCall[] | null>(null)
   /** Answers to older questions are ignored (a later keystroke won). */
   const askSeq = useRef(0)
+  /** The sentence already asked, so a re-render (data arriving) does not ask it twice. */
+  const lastAsked = useRef("")
 
   const ready = isNeedleReady(needle)
 
@@ -137,6 +143,7 @@ export function CommandPalette() {
       setAsked(null)
       setAsking(false)
       askSeq.current += 1
+      lastAsked.current = ""
       setOpen(true)
     }
     const onKey = (e: KeyboardEvent) => {
@@ -198,9 +205,11 @@ export function CommandPalette() {
     const text = input.trim()
     if (!text || !data) return
     const seq = ++askSeq.current
+    lastAsked.current = text
     setAsking(true)
     try {
-      const result = await needleAsk(text, buildTools(ctx))
+      // The context grounds every answer: arguments the sentence never said are dropped.
+      const result = await needleAsk(text, buildTools(ctx), ctx)
       if (askSeq.current !== seq) return
       setAsked(result)
     } catch (e) {
@@ -210,15 +219,36 @@ export function CommandPalette() {
     }
   }
 
-  // Typing a sentence that reads like a command asks Needle after a short pause.
+  /** The project a question asks about ("what's left on Corvogames"), answered without Needle. */
+  const overview = useMemo(
+    () =>
+      data
+        ? projectQuestion(
+            query,
+            data.projects.map((r) => r.project.name)
+          )
+        : null,
+    [query, data]
+  )
+
+  /** A plain "show paused projects" filter, built from the words and the live lists only. */
+  const builtinFilter = useMemo(
+    () => (data && !overview ? builtinProjectFilter(query, ctx) : null),
+    [query, data, overview, ctx]
+  )
+
+  // Typing a sentence that reads like a command asks Needle after a short pause. A question about a
+  // project, or a filter the app can build itself, never goes to Needle.
   useEffect(() => {
     const text = query.trim()
-    if (!open || !ready || !data || !looksLikeCommand(text)) return
+    if (!open || !ready || !data || overview || builtinFilter) return
+    if (lastAsked.current === text) return
+    if (looksLikeQuestion(text) || !looksLikeCommand(text)) return
     const timer = setTimeout(() => void askNow(text), ASK_DELAY_MS)
     return () => clearTimeout(timer)
     // askNow is recreated per render on purpose; the query and the loaded data are the triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, open, ready, data])
+  }, [query, open, ready, data, overview, builtinFilter])
 
   function go(path: string, params?: Record<string, string>) {
     setOpen(false)
@@ -255,9 +285,11 @@ export function CommandPalette() {
         ...asked.held.slice(0, 2).map((call) => ({ call, held: true })),
       ].slice(0, 2)
     : []
-  const wantsCommand = looksLikeCommand(query)
-  /** The add-on answered, but read no action in the sentence. */
-  const noAction = asked !== null && preview.length === 0
+  const wantsCommand =
+    looksLikeCommand(query) &&
+    !looksLikeQuestion(query) &&
+    overview === null &&
+    builtinFilter === null
 
   return (
     <>
@@ -275,6 +307,7 @@ export function CommandPalette() {
               setQuery(value)
               // A new sentence replaces the last answer; an in-flight one is ignored by its seq.
               askSeq.current += 1
+              lastAsked.current = ""
               setAsked(null)
               setAsking(false)
             }}
@@ -290,7 +323,14 @@ export function CommandPalette() {
             }
             onKeyDown={(e) => {
               // Tab asks right away, without waiting for the pause after typing.
-              if (e.key === "Tab" && ready && query.trim()) {
+              if (
+                e.key === "Tab" &&
+                ready &&
+                query.trim() &&
+                !overview &&
+                !builtinFilter &&
+                !looksLikeQuestion(query)
+              ) {
                 e.preventDefault()
                 void askNow(query)
               }
@@ -301,18 +341,34 @@ export function CommandPalette() {
               {data ? "Nothing matches." : "Reading projects, apps and skills..."}
             </CommandEmpty>
 
-            {(asking || preview.length > 0 || noAction) && (
+            {(asking || overview !== null || builtinFilter !== null || preview.length > 0) && (
               <CommandGroup heading="Action">
+                {overview !== null && (
+                  <CommandItem
+                    value="needle-overview"
+                    keywords={[query, overview, "what's left", "tasks", "next"]}
+                    onSelect={() => go("/projects", { open: overview, tab: "tasks" })}
+                  >
+                    <FolderKanban className="size-3.5 text-muted-foreground" />
+                    <span className="truncate">Show what&apos;s left on {overview}</span>
+                    <CommandShortcut>↵</CommandShortcut>
+                  </CommandItem>
+                )}
+                {builtinFilter !== null && (
+                  <CommandItem
+                    value="needle-filter"
+                    keywords={[query, callSentence(builtinFilter)]}
+                    onSelect={() => choose(builtinFilter, false)}
+                  >
+                    <Filter className="size-3.5 text-muted-foreground" />
+                    <span className="truncate">{callSentence(builtinFilter)}</span>
+                    <CommandShortcut>↵</CommandShortcut>
+                  </CommandItem>
+                )}
                 {asking && (
                   <CommandItem value="needle-asking" keywords={[query]} disabled>
                     <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
                     <span className="text-muted-foreground">Asking Needle…</span>
-                  </CommandItem>
-                )}
-                {noAction && (
-                  <CommandItem value="needle-none" keywords={[query]} disabled>
-                    <Sparkles className="size-3.5 text-muted-foreground" />
-                    <span className="text-muted-foreground">No action found in that sentence.</span>
                   </CommandItem>
                 )}
                 {preview.map(({ call, held }, index) => {
@@ -329,13 +385,7 @@ export function CommandPalette() {
                       <span className={held ? "truncate text-muted-foreground" : "truncate"}>
                         {held ? `Did you mean… ${callSentence(call)}` : callSentence(call)}
                       </span>
-                      {held ? (
-                        <CommandShortcut>check</CommandShortcut>
-                      ) : spec?.safe ? (
-                        <CommandShortcut>open</CommandShortcut>
-                      ) : (
-                        <CommandShortcut>confirm</CommandShortcut>
-                      )}
+                      <CommandShortcut>↵</CommandShortcut>
                     </CommandItem>
                   )
                 })}

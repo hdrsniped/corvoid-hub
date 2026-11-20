@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 — 2026-11-21
+
+- Needle commands only suggest what you actually said (no more invented filters)
+- "What's left on <project>" opens that project's open tasks
+- Questions are no longer sent to Needle; only one Needle process runs
+
 ## 1.1.0 — 2026-11-20
 
 - Quick log works out of the box: the app writes log lines and ticks tasks itself (no scripts needed)

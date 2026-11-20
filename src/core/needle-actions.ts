@@ -106,6 +106,12 @@ export async function runNeedleCall(call: NeedleCall, ctx: NeedleContext = {}): 
       navigate("/projects", { open: record.project.name })
       return
     }
+    case "project_overview": {
+      // The sheet opens on its task lists (Next first), so the answer to "what's left" is in view.
+      const record = await findProject(text(args.project))
+      navigate("/projects", { open: record.project.name, tab: "tasks" })
+      return
+    }
     case "add_task": {
       const task = text(args.task)
       if (!task) throw new Error("the task is empty")

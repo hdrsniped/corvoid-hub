@@ -85,6 +85,8 @@ export function ProjectsPage() {
   // The command palette (and a plain link) opens a project with #/projects?open=<name>.
   const { params } = useRoute()
   const openParam = params.get("open") || null
+  // `#/projects?open=X&tab=tasks` opens the sheet on its task lists ("what's left on X").
+  const focusTasks = params.get("tab") === "tasks"
   // A card click wins over the query, so a deep link to a project that no longer exists
   // cannot block the sheet; closing the sheet drops both.
   const openName = manualOpen ?? openParam
@@ -422,6 +424,7 @@ export function ProjectsPage() {
               categories={categoryList}
               onSaved={reload}
               onCategoriesChanged={categories.reload}
+              focusTasks={focusTasks}
             />
           )}
         </SheetContent>

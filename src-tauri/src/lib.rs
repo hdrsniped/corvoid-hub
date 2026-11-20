@@ -917,6 +917,14 @@ struct NeedleSidecar {
     next_id: u64,
 }
 
+/// A dropped worker never leaves its process behind (`std::process::Child` does not kill on drop).
+impl Drop for NeedleSidecar {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 static NEEDLE: Mutex<Option<NeedleSidecar>> = Mutex::new(None);
 /// The last failure, so needle_status can explain why commands do not work.
 static NEEDLE_ERROR: Mutex<Option<String>> = Mutex::new(None);
@@ -952,13 +960,18 @@ fn needle_error() -> Option<String> {
 /// True when the worker process is still alive. Never waits for a request in flight.
 fn needle_running() -> bool {
     match NEEDLE.try_lock() {
-        Ok(mut guard) => match guard.as_mut() {
-            Some(proc) => matches!(proc.child.try_wait(), Ok(None)),
-            None => false,
-        },
+        Ok(mut guard) => needle_alive(&mut guard),
         // A locked worker is answering a request right now, so it is running.
         Err(std::sync::TryLockError::WouldBlock) => true,
         Err(std::sync::TryLockError::Poisoned(_)) => false,
+    }
+}
+
+/// True when the held worker (if any) is still alive.
+fn needle_alive(guard: &mut Option<NeedleSidecar>) -> bool {
+    match guard.as_mut() {
+        Some(proc) => matches!(proc.child.try_wait(), Ok(None)),
+        None => false,
     }
 }
 
@@ -970,6 +983,21 @@ fn needle_kill() {
             let _ = proc.child.wait();
         }
     }
+}
+
+/// Makes sure one worker is running. Callers hold the NEEDLE guard, so two requests that arrive
+/// together can never start two processes: the first spawns, the second reuses it. A dead or hung
+/// child is killed before a new one starts.
+fn needle_ensure(app: &tauri::AppHandle, guard: &mut Option<NeedleSidecar>) -> Result<(), String> {
+    if needle_alive(guard) {
+        return Ok(());
+    }
+    if let Some(mut old) = guard.take() {
+        let _ = old.child.kill();
+        let _ = old.child.wait();
+    }
+    *guard = Some(needle_spawn(app)?);
+    Ok(())
 }
 
 /// Starts the worker: the configured Python, our script, no console window, no network use.
@@ -1015,8 +1043,21 @@ fn needle_spawn(app: &tauri::AppHandle) -> Result<NeedleSidecar, String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start Needle: {e}"))?;
-    let stdin = child.stdin.take().ok_or("Needle stdin is not open")?;
-    let stdout = child.stdout.take().ok_or("Needle stdout is not open")?;
+    let stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.kill();
+            return Err("Needle stdin is not open".into());
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Needle stdout is not open".into());
+        }
+    };
     let (sender, lines) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -1047,14 +1088,8 @@ fn needle_ask_blocking(
     let mut guard = NEEDLE
         .lock()
         .map_err(|_| "the Needle worker is locked".to_string())?;
-    let dead = match guard.as_mut() {
-        None => true,
-        Some(proc) => !matches!(proc.child.try_wait(), Ok(None)),
-    };
-    if dead {
-        *guard = None;
-        *guard = Some(needle_spawn(app)?);
-    }
+    // One spawn per guard: a second request waits here instead of starting its own worker.
+    needle_ensure(app, &mut guard)?;
     let proc = guard.as_mut().ok_or("the Needle worker did not start")?;
 
     let id = proc.next_id;
