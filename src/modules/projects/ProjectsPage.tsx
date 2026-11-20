@@ -286,7 +286,7 @@ export function ProjectsPage() {
                       key={rec.project.name}
                       role="button"
                       tabIndex={0}
-                      className="cursor-pointer rounded-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      className="min-w-0 cursor-pointer rounded-xl text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                       onClick={() => setManualOpen(rec.project.name)}
                       onKeyDown={(e) => {
                         if (
@@ -299,11 +299,11 @@ export function ProjectsPage() {
                       }}
                     >
                       <Card
-                        className="h-full gap-3 border-l-[3px] transition hover:ring-2 hover:ring-ring/40"
+                        className="h-full min-w-0 gap-3 border-l-[3px] transition hover:ring-2 hover:ring-ring/40"
                         style={{ borderLeftColor: accent }}
                       >
-                        <CardHeader>
-                          <div className="flex items-start justify-between gap-2">
+                        <CardHeader className="min-w-0 grid-cols-1">
+                          <div className="flex min-w-0 items-start justify-between gap-2">
                             <CardTitle className="min-w-0 flex-1 truncate" title={rec.project.name}>
                               {rec.project.name}
                             </CardTitle>

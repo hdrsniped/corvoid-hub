@@ -42,6 +42,12 @@ The app is optional. Everything it does is a plain file edit, so any AI agent ca
 | **Skills** | **Guide** |
 | ![Skills](docs/screenshots/skills.png) | ![Guide](docs/screenshots/guide.png) |
 
+## Requirements
+
+- Windows 10 or 11
+- At least one AI coding agent: [Claude Code](https://claude.com/claude-code), [Antigravity](https://antigravity.google) or [OpenCode](https://opencode.ai)
+- [Obsidian](https://obsidian.md) (free), recommended for reading your notes. The vault is a plain folder of Markdown files, so the app works without it.
+
 ## Install
 
 1. Download the `x64-setup.exe` installer from [Releases](https://github.com/hdrsniped/corvoid-hub/releases) and run it.
