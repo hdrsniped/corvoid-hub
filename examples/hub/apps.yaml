@@ -1,0 +1,9 @@
+- name: Pixel Forge
+  path: C:\Dev\pixel-forge
+  what: Sprite sheet packer for game projects
+- name: Clip Cutter
+  path: C:\Dev\clip-cutter
+  what: Cuts long recordings into short clips
+- name: Key Vault
+  path: C:\Dev\key-vault
+  what: Local API key manager for scripts

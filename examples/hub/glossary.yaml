@@ -1,0 +1,62 @@
+# Corvoid Hub terms: one vocabulary for you, every AI harness and the app.
+# The cv: prefix is for talking (me to AI, AI to AI). Never write it into notes or frontmatter.
+- term: cv:hub
+  icon: boxes
+  means: My folder of global rules, chosen skills and the apps index.
+  say: cv:hub what's in it?
+- term: cv:global-rules
+  icon: scroll-text
+  means: The main instructions every AI follows (AGENTS.md in the hub).
+  say: add this to cv:global-rules
+- term: cv:skill
+  icon: sparkles
+  means: A small how-to an AI can follow; hub skills are shared to every harness.
+  say: cv:skill move vault to hub
+- term: cv:app
+  icon: app-window
+  means: One of my reusable programs, listed in the apps index and kept in its own folder.
+  say: cv:app add C:\Dev\my-tool
+- term: cv:project
+  icon: folder-kanban
+  means: One thing I'm building, with its own note in the vault (goal, tasks, history).
+  say: cv:project Starfall status?
+- term: cv:task
+  icon: circle-check
+  means: A mini mission inside a project; open in Next, finished in Done.
+  say: cv:add task fix login
+- term: cv:version
+  icon: git-branch
+  means: A project round (v1, v2...); progress restarts at 0 and old tasks go to History.
+  say: cv:start v2
+- term: cv:log
+  icon: pen-line
+  means: A line in today's diary of work, tagged as a finished task or an update.
+  say: cv:log this
+- term: cv:log-mode
+  icon: toggle-right
+  means: Per project, whether the AI logs every finished task by itself (auto) or only when I say so (on-demand).
+  say: cv:log-mode auto
+- term: cv:category
+  icon: tag
+  means: A project's type (Game Dev, App Dev...); the first one sets its color.
+  say: cv:category game-dev
+- term: cv:harness
+  icon: bot
+  means: The AI tool doing the work (Claude Code, Antigravity, OpenCode), or me.
+  say: cv:harness which one last worked on this?
+- term: cv:transfer
+  icon: arrow-right-left
+  means: Move a project to another harness with one prompt that has everything it needs.
+  say: cv:transfer antigravity
+- term: cv:onboard
+  icon: folder-input
+  means: Add a project I already have, so it gets a note, tasks and handoff files.
+  say: cv:onboard C:\Dev\my-game
+- term: cv:handoff
+  icon: hand
+  means: A short status file in the project so the next AI can continue where this one stopped.
+  say: cv:handoff
+- term: cv:lock
+  icon: lock
+  means: Protect a folder; read-only blocks changes, no-ai also keeps AI out.
+  say: cv:lock C:\Dev\secret no-ai

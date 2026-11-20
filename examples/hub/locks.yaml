@@ -1,0 +1,3 @@
+# Folders to protect. mode: read-only (no changes) or no-ai (agents stay out).
+# - path: C:\Dev\secret-project
+#   mode: no-ai

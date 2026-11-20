@@ -1,0 +1,18 @@
+- slug: game-dev
+  name: Game Dev
+  hue: 300
+- slug: app-dev
+  name: App Dev
+  hue: 250
+- slug: web-dev
+  name: Web Dev
+  hue: 200
+- slug: ai-tooling
+  name: AI Tooling
+  hue: 160
+- slug: automation
+  name: Automation
+  hue: 110
+- slug: content
+  name: Content
+  hue: 30
