@@ -15,10 +15,12 @@ Desktop app (Tauri v2 + React + Vite + TypeScript + shadcn/ui) that is the UI fo
 src-tauri/src/lib.rs      Rust commands: get_config, list_dir, read_text, write_text, delete_file, run_hub_sync,
                           skill_install_git, copy_into_inbox, save_inbox_text, skill_roots, path_exists,
                           resolve_path, skill_copy_to_hub, skill_transfer, skill_remove, quicklog_suggest,
-                          quicklog_commit, apply_locks
-                          Paths are not hardcoded: `Config` is loaded once (OnceLock) from corvoid-hub.json (see
+                          quicklog_commit, apply_locks, setup_detect, setup_save, setup_wire_rules, config_path,
+                          harness_icon, backup_create, backup_list, backup_restore, backup_settings,
+                          backup_adopt
+                          Paths are not hardcoded: `Config` (RwLock, reloadable) comes from corvoid-hub.json (see
                           Config below) and every derived path comes from it. Every path is checked against the
-                          allowed roots: hub, vault, %USERPROFILE%\.claude\skills and %USERPROFILE%\.gemini\config\skills
+                          allowed roots: hub, vault, and the configured claudeSkills and antigravitySkills folders
                           (deny otherwise); .obsidian/.smart-env stay blocked.
                           write_text creates missing parent folders. delete_file only removes single files (no
                           folders, no links) inside hub\packs or hub\inbox. path_exists is the only command that
@@ -31,9 +33,15 @@ src-tauri/src/lib.rs      Rust commands: get_config, list_dir, read_text, write_
                           -Harness me (kind must be task|update, the project folder must be in Projects\), apply_locks
                           runs bin\apply-locks.ps1. Those three run off the UI thread with -ExecutionPolicy Bypass
                           and no console window. Missing scripts come back as a clear message, never a crash.
-                          Logs go to <logDir> (default <hub>\.logs).
+                          setup_* is first-run setup (see Setup below) and harness_icon reads the Antigravity icon
+                          out of its exe. get_config reloads the config when the file on disk changed, so a setup
+                          written by an agent is picked up without a restart. Logs go to <logDir> (default <hub>\.logs).
+                          backup_* is the zip backup (see Backups below); it writes into backupDir, which may live
+                          outside the hub and vault.
 src/core/                 shared: tauri wrappers (fs.ts), frontmatter parse/write (markdown.ts), types.ts,
-                          config.ts (cfg() + loadConfig, nothing hardcoded)
+                          config.ts (cfg() + loadConfig + reloadConfig/onConfigChange, nothing hardcoded)
+src/core/setup.ts         first-run setup: setup_detect, setup_save, setup_wire_rules, config_path + types
+src/core/setup-prompt.ts  buildSetupPrompt: the plain-text prompt handed to an AI harness (no cv: words)
 src/core/apps.ts          apps.yaml load/save (keeps header comments and unknown keys), add/rename/remove helpers
 src/core/shell.ts         openFolder: opener plugin open_path, falls back to reveal_item_in_dir
 src/core/clipboard.ts     copyText: async clipboard API, hidden-textarea fallback
@@ -54,10 +62,13 @@ src/core/quicklog.ts      needle-log JSON suggestion parse (exit 0/3/4), kind gu
 src/core/harness.ts       harness ids (claude-code | antigravity | opencode | me | other) parsed from log bullets; isAiHarness()
 src/core/glossary.ts      glossary.yaml load/parse (list of {term, icon, means, say}), session cache, useGlossary(),
                           term(key) lookup by cv:x or x. Read-only: the app never writes this file.
+src/core/backup.ts        backup_create/list/restore/settings/adopt wrappers, backupNow() (shared toast),
+                          backupDate/formatBytes
 src/assets/hub-mark.svg   the app's own mark (hub: center node + 5 linked nodes). Source for the app icons. Uses currentColor.
 src/components/           shared UI pieces: harness-icon.tsx (HarnessIcon + HarnessGlyph), hub-mark.tsx (HubMark, HubMarkIcon),
                           lock-control.tsx (LockControl menu, LockBadge for card icon rows),
-                          command-palette.tsx (Ctrl+K search over projects/apps/skills/terms/screens),
+                          command-palette.tsx (Ctrl+K search over projects/apps/skills/terms/screens + Setup + Back up now),
+                          setup-dialog.tsx (first-run Setup, both tabs, openSetup() event),
                           chart-gradient.tsx (AreaGradients, areaFill, useChartId), category-badge.tsx,
                           category-chips.tsx (main badge + "+N" popover), progress-bar.tsx (thin bar),
                           page-toolbar.tsx (PageToolbar portal into the top bar), external-link-guard.tsx,
@@ -76,7 +87,7 @@ src/modules/guide/        GuidePage (glossary.yaml as compact cards, search, dee
 src/modules/registry.ts   the ONLY place modules are listed. Add/remove a screen = add/remove one line here.
 src/components/ui/        shadcn components (add with the shadcn CLI, don't hand-write)
 ```
-Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categories, Locks tabs), `skills`, `guide`.
+Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categories, Locks, Backups tabs), `skills`, `guide`.
 
 ## Guide and term hints
 - `<hub>\glossary.yaml` is the only vocabulary: a list of `{term: cv:x, icon: <lucide kebab-case>, means, say}`. The app reads it and never writes it. A missing file means no terms, not an error.
@@ -100,11 +111,12 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 - Project color = its MAIN category hue shifted by a name hash (up to +-25 degrees) plus one of three lightness steps. Use it for card accents, timeline dots, graph nodes and chart series.
 - L/C are constants in `colors.ts`, not CSS variables, because canvas (graph) and SVG chart attributes cannot read CSS variables. Read the theme with `useDark()`.
 - Charts are area charts: `natural` curves, a vertical gradient fill fading to transparent (`AreaGradients`), project colors per series. The Activity stacked chart is `ActivityAreaChart.tsx` (range toggle 7d/30d/90d, custom tooltip).
-- Harness icons are in the brand color (`harnessColor`): Claude Code = simple-icons brand converted to oklch; Antigravity = a small orbit glyph in Google blue; OpenCode is black in its brand, so it follows the theme (dark ink on light, light ink on dark). Names come from `harness.ts`.
+- Harness icons are in the brand color (`harnessColor`): Claude Code = simple-icons brand converted to oklch; Antigravity = the installed app's own icon when there is one (else a neutral `Orbit` glyph in Google blue); OpenCode is black in its brand, so it follows the theme (dark ink on light, light ink on dark). Names come from `harness.ts`.
 - Harness `me`: log bullets ending in "(me)" that the user wrote without AI. Icon = the app mark (`HubMark`, grayscale). It is not an AI harness, so it is left out of the harness charts and tiles (`isAiHarness`).
 
 ## Harness display
-- A harness is never text. Always `HarnessIcon` from `src/components/harness-icon.tsx` (or `HarnessGlyph` when the name sits next to it, e.g. a menu item): brand-colored Claude Code glyph, the real Antigravity PNG, OpenCode in the theme's ink, and `HubMark` for `me`.
+- A harness is never text. Always `HarnessIcon` from `src/components/harness-icon.tsx` (or `HarnessGlyph` when the name sits next to it, e.g. a menu item): brand-colored Claude Code glyph, Antigravity's installed app icon (or the `Orbit` fallback), OpenCode in the theme's ink, and `HubMark` for `me`.
+- The Antigravity icon is not shipped: Rust `harness_icon("antigravity")` extracts it from `antigravityExe` with System.Drawing into `<logDir>\..\icons\antigravity.png` (cache, regenerated when the exe is newer) and returns a base64 data URL. `antigravityAppIcon()` (core/harness.ts) caches that promise for the session; without the app, an `Orbit` glyph in the brand hue is drawn.
 - `HarnessIcon harness={raw}` always renders: empty → muted dashed circle, tooltip "No harness yet"; text that is not a known harness → muted "?" circle, tooltip = the raw text. So a project with `harness:` empty shows a state, not nothing.
 - Hub-owned things (hub skills, apps from apps.yaml) show `HubMarkIcon`, never a text "Hub" pill. Hub skills also show every harness they reach.
 - One icon row per card, bottom-right: project card = harness, skill card = hub mark + harnesses, app card = hub mark. A locked item adds `LockBadge` to the left of those. Icons in rows are `size-3.5`, icons in titles `size-4`.
@@ -132,8 +144,17 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 - `LockBadge` puts the small mark in a card's bottom-right icon row, left of the harness/hub icons: muted for read-only, red-ish oklch for no-ai (`lockColor` in colors.ts).
 - Hub → Locks tab (`modules/hub/LocksPanel.tsx`) lists every entry (path, mode select, Remove) and adds one with the folder picker; each change is saved and applied at once.
 
+## Backups
+- One backup = one zip in `backupDir`: `corvoid-backup-YYYYMMDD-HHMMSS.zip` with `hub/`, `vault/`, `corvoid-hub.json` and `manifest.json` (app version, created, hub path, vault path, file count, skipped files). Files are streamed through the `zip` crate (deflate); files over 50 MB are skipped and named in the manifest.
+- `hub/` leaves out `node_modules`, `target`, `dist`, `.git`, `backups/`, `.logs/`, and any `app/` folder that holds a `package.json` (an app repo is not hub data). `vault/` holds only `Projects/`, `Log/`, `Templates/`, `_system/` and the root `*.md` files, never `.obsidian/`, `.smart-env/` or `.trash/`. Links are never followed.
+- Rust (`lib.rs`): `backup_create(destPath?)` writes one now (the save dialog path, else `backupDir`) and returns `{path, size, files}`; `backup_list()` lists the zips in `backupDir`, newest first; `backup_settings(autoBackup, keepBackups)` writes those two keys and reloads the config; `backup_adopt(folder)` points `hub`/`vault` at `folder\hub` and `folder\vault` (config paths only, no file moves).
+- **Restore never overwrites in place.** `backup_restore(path)` first writes a fresh backup of the current state, then extracts into `<backupDir>\restore-YYYYMMDD-HHMMSS` and returns that folder. Zip entries with `..` or absolute paths are refused, so a zip cannot write outside its folder.
+- Auto backup runs on a background thread at start (after the config is loaded): when `autoBackup` is `daily`/`weekly` and the newest zip is older than 1/7 days, it writes one, then deletes the oldest beyond `keepBackups`. Pruning only touches files that match the backup name pattern.
+- Hub screen → **Backups** tab (`modules/hub/BackupsPanel.tsx`, `ArchiveRestore`): Back up now, Export to file… (native save dialog), Open folder, the auto-backup select (Daily/Weekly/Off), the keep count, and the list (date, size, Restore). Restore asks in an AlertDialog; the dialog afterwards offers Open folder and **Use as my hub and vault**. Ctrl+K has **Back up now** (`core/backup.ts` → `backupNow()`).
+- Every backup toasts its file path. `src/core/backup.ts` holds the wrappers, `backupNow()`, `backupDate()` and `formatBytes()`.
+
 ## Command palette (Ctrl+K)
-- `src/components/command-palette.tsx`, shadcn `Command` dialog (`bunx shadcn@latest add command` also adds `ui/input-group.tsx` and the `cmdk` dependency). It searches projects, apps, skills, glossary terms and screens in one list; Enter opens the item. The sidebar footer shows the `Ctrl K` hint and opens it too (`openCommandPalette()` fires a window event, so nothing is lifted into the shell).
+- `src/components/command-palette.tsx`, shadcn `Command` dialog (`bunx shadcn@latest add command` also adds `ui/input-group.tsx` and the `cmdk` dependency). It searches projects, apps, skills, glossary terms and screens in one list; Enter opens the item. The "App" group also holds Setup and **Back up now** (writes a backup at once). The sidebar footer shows the `Ctrl K` hint and opens it too (`openCommandPalette()` fires a window event, so nothing is lifted into the shell).
 - Opening an item is a hash deep link, parsed with `core/navigation.ts`: `#/projects?open=<name>` (project sheet), `#/skills?skill=<key>` (skill sheet), `#/apps?focus=<name>` (scrolls to the card and rings it), `#/guide?term=cv:x` (Guide filtered to that term), `#/<route>` (screen). The screen derives its open item from the query, and closing the sheet calls `navigate()` to drop the query, so no open item is stored twice.
 - The palette loads through the same loaders as the screens (projects, apps, skills, glossary) and caches them for a minute; a source that fails to load is skipped with a toast.
 
@@ -147,8 +168,8 @@ Modules: `projects`, `apps`, `activity`, `graph`, `hub` (Rules, Packs, Categorie
 
 ## Skill sources
 - hub: `<hub>\skills\<name>` (configured hub, source of truth).
-- Claude Code: `%USERPROFILE%\.claude\skills\<name>`.
-- Antigravity: `%USERPROFILE%\.gemini\config\skills\<name>`.
+- Claude Code: `%USERPROFILE%\.claude\skills\<name>` (`claudeSkills`).
+- Antigravity: `%USERPROFILE%\.gemini\config\skills\<name>` (`antigravitySkills`).
 The three folders are allowed roots in Rust (`skill_roots`). `loadSkillIndex` (core/skills.ts) reads all three; a harness folder with the same name as a hub skill, or a symlink into the hub, is shown once as Hub with harness icons (`linked: true`). A skill present only in a harness folder is shown with that source.
 
 ## Move, copy and remove a skill
@@ -160,11 +181,21 @@ The three folders are allowed roots in Rust (`skill_roots`). `loadSkillIndex` (c
 - Moving a hub skill to a single harness un-shares it: it leaves `skills\` and lands in that harness folder. `skills\` stays the source of truth for anything shared.
 
 ## Config (corvoid-hub.json)
-- Nothing is hardcoded. Rust `Config` (`OnceLock`, loaded once) reads the first file it finds: `CORVOID_HUB_CONFIG`, then `corvoid-hub.json` next to the executable, then `%USERPROFILE%\.corvoid-hub.json`. No file = defaults; a broken file is logged (`logWarn`) and the defaults are used.
-- Keys: `hub` (default `%USERPROFILE%\ai-hub`), `vault` (default `%USERPROFILE%\Documents\Vortex`), `vlog` and `needleLog` (optional; without both, quick log is off with a clear message), `logDir` (default `<hub>\.logs`). `corvoid-hub.example.json` is the template; README documents each key.
-- Derived: `<hub>\{skills,inbox,packs}`, `<hub>\hub-sync.ps1`, `<hub>\bin\apply-locks.ps1`; `<vault>\Projects`, `<vault>\Log`. `get_config()` returns all of them plus `source` (the file that was read, or "defaults"), `quickLog`, `hubExists` and `vaultExists`.
-- `src/core/config.ts` loads it once (`loadConfig()` awaited in `main.tsx` before the first render) and every screen uses `cfg()`. Never add a path constant back.
-- A screen declares `needs: "hub" | "vault"` in its `index.ts`; `app-shell.tsx` renders `RootMissing` (components/root-missing.tsx, "Set your hub path in corvoid-hub.json") instead of the page when that folder is not on disk. Loaders also tolerate a missing `skills\` or `inbox\` folder.
+- Nothing is hardcoded. Rust `Config` (`RwLock`, reloadable) reads the first file it finds: `CORVOID_HUB_CONFIG`, then `corvoid-hub.json` next to the executable, then `%USERPROFILE%\.corvoid-hub.json`. No file = defaults; a broken file is logged (`logWarn`) and the defaults are used.
+- Keys: `hub` (default `%USERPROFILE%\ai-hub`), `vault` (default `%USERPROFILE%\Documents\Vortex`), `claudeSkills` (default `%USERPROFILE%\.claude\skills`), `antigravitySkills` (default `%USERPROFILE%\.gemini\config\skills`), `opencodeConfig` (default `%USERPROFILE%\.config\opencode`), `antigravityExe` (default: the first existing of `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe` and `%ProgramFiles%\Antigravity\Antigravity.exe`), `vlog` and `needleLog` (optional; without both, quick log is off with a clear message), `logDir` (default `<hub>\.logs`), `backupDir` (default `<hub>\backups\corvoid`), `autoBackup` (daily | weekly | off, default daily), `keepBackups` (default 10). `corvoid-hub.example.json` is the template; README documents each key.
+- Derived: `<hub>\{skills,inbox,packs}`, `<hub>\hub-sync.ps1`, `<hub>\bin\apply-locks.ps1`; `<vault>\Projects`, `<vault>\Log`. `get_config()` returns all of them plus the harness folders, `source` (the file that was read, or "defaults"), `configured` (a config file was found), `quickLog`, `hubExists` and `vaultExists`.
+- `get_config` calls `refresh_if_changed()`: if the file on disk is not the loaded one or is newer, the config is reloaded. That is how Setup's 2 s poll notices a config an agent just wrote.
+- `src/core/config.ts` loads it once (`loadConfig()` awaited in `main.tsx` before the first render) and every screen uses `cfg()`. `reloadConfig()` (after setup) notifies `onConfigChange` subscribers; `AppShell` bumps a key so the open screen remounts on the new roots. Never add a path constant back.
+- A screen declares `needs: "hub" | "vault"` in its `index.ts`; `app-shell.tsx` renders `RootMissing` (components/root-missing.tsx, one sentence plus an **Open setup** button) instead of the page when that folder is not on disk. Loaders also tolerate a missing `skills\` or `inbox\` folder.
+
+## Setup (first run)
+- `src/components/setup-dialog.tsx` renders one compact Dialog in `app-shell.tsx`. It opens by itself while `cfg().configured` is false, and from Hub's toolbar **Setup** button and the Ctrl+K palette (`openSetup()` fires a `hub:setup` window event, so no state lives in the shell).
+- **With an AI** (default tab): `ToggleGroup` of the three harness logos, a collapsed read-only preview of the prompt, a big **Copy prompt** button, then a spinner and "Waiting for setup…" while `get_config` is polled every 2 s. When `configured` turns true: toast "Setup done", close, `reloadConfig()`.
+- The prompt (`core/setup-prompt.ts` → `buildSetupPrompt`, plain text, no `cv:` words) says what the app is, lists every path from `setup_detect` (so the agent does not guess), and walks it through: confirm hub/vault, write the config with the five keys, create the hub starters and the vault `Projects`/`Log`/`Templates/Project.md`, then wire the rules into the chosen harnesses (Claude Code `@<hub>\AGENTS.md` in CLAUDE.md, OpenCode `instructions` entry, Antigravity plugin folder), backing up every file first.
+- **Manual** tab: one row per path (status dot, label, input, native picker; a select of `obsidianVaults` for the vault), checkboxes "Create starter files" and "Connect global rules to my harnesses", and Save.
+- `setup_detect()` is read-only: the six paths with `{path, exists}`, `obsidianVaults` from `%APPDATA%\obsidian\obsidian.json` (`vaults.*.path`, errors ignored), `configPath`, `configured`.
+- `setup_save(fields, createStarters)` merges into the existing config (keeps `vlog`, `needleLog`, `logDir`, `backupDir`, `autoBackup`, `keepBackups`), writes it at `config_target_path()` (env var, else the file in use, else `%USERPROFILE%\.corvoid-hub.json`), creates hub and vault, and copies missing starters from `examples/` (`include_str!`): hub `AGENTS.md`, `categories.yaml`, `glossary.yaml`, `apps.yaml`, `locks.yaml`, `skills/`, `packs/`; vault `Projects/`, `Log/`, `Templates/Project.md`. Existing files are never overwritten. Then it reloads the config.
+- `setup_wire_rules(harnesses)` only touches a harness whose folder exists, backs up each edited file as `<name>.bak-YYYYMMDD-HHMMSS` next to it, and is idempotent: an import line, `instructions` entry or plugin folder that is already there is left alone (jsonc comments are stripped before reading). Antigravity gets `<antigravitySkills>\..\plugins\corvoid-hub\` with `plugin.json` and `rules/AGENTS.md`; that copy is re-copied by the agent whenever the rules change.
 
 ## Skill intake (the key workflow)
 The Skills screen offers three ways to add a skill; all land in `hub/inbox/<name>/`, not in `skills/`:

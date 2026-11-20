@@ -30,6 +30,7 @@ The app is optional. Everything it does is a plain file edit, so any AI agent ca
 - **Skills**: hub skills shared to every harness, plus each harness's own. Move a skill between the hub, Claude Code and Antigravity, or remove it (it goes to a backup, never hard-deleted).
 - **Transfer**: one copy-paste prompt that hands a project to another harness with everything it needs.
 - **Locks**: mark a folder read-only, or no-ai to keep agents out completely.
+- **Backups**: one zip of the hub and vault, daily or weekly on its own, and a restore that never overwrites (it extracts into a new folder and backs up the current state first).
 - **Apps and Guide**: an index of your reusable tools and a shared vocabulary (`cv:task`, `cv:version` …) that every agent reads the same way.
 - **Search everything** with `Ctrl+K`.
 
@@ -44,7 +45,8 @@ The app is optional. Everything it does is a plain file edit, so any AI agent ca
 ## Install
 
 1. Download `Corvoid Hub_1.0.0_x64-setup.exe` from [Releases](https://github.com/hdrsniped/corvoid-hub/releases) and run it.
-2. Tell the app where your hub and vault are (see [Configure](#configure)). With no config it looks in `%USERPROFILE%\ai-hub` and `%USERPROFILE%\Documents\Vortex`.
+2. On first launch the app opens **Setup**: point it at your hub folder and Obsidian vault, either by pasting one prompt into Claude Code, Antigravity or OpenCode (the agent does the rest), or by filling in the paths yourself. With no config at all it falls back to `%USERPROFILE%\ai-hub` and `%USERPROFILE%\Documents\Vortex` (see [Configure](#configure)).
+3. Setup can also connect the hub's `AGENTS.md` to your harnesses, so they all follow the same rules: a line in `~/.claude/CLAUDE.md`, an `instructions` entry in OpenCode's config, or a small plugin folder for Antigravity. Every file it edits is backed up next to itself first (`CLAUDE.md.bak-20261120-101500`), and nothing is overwritten twice.
 
 It needs the Microsoft Edge WebView2 Runtime, which Windows 10 and 11 already include.
 
@@ -52,18 +54,26 @@ New to all this? Copy [`examples/hub`](examples/hub) and [`examples/vault`](exam
 
 ## Configure
 
-The app reads one JSON file, the first one it finds:
+Setup writes one JSON file, which the app then reads (first match wins):
 
 1. the path in the environment variable `CORVOID_HUB_CONFIG`
 2. `corvoid-hub.json` next to the executable
 3. `%USERPROFILE%\.corvoid-hub.json`
 
+You can also edit it by hand; the app picks up changes as soon as it reads the file again (no restart needed after Setup).
+
 ```json
 {
   "hub": "C:\\Users\\you\\ai-hub",
   "vault": "C:\\Users\\you\\Documents\\Vortex",
+  "claudeSkills": "C:\\Users\\you\\.claude\\skills",
+  "antigravitySkills": "C:\\Users\\you\\.gemini\\config\\skills",
+  "opencodeConfig": "C:\\Users\\you\\.config\\opencode",
   "vlog": "C:\\Users\\you\\tools\\vlog\\vlog.ps1",
-  "needleLog": "C:\\Users\\you\\tools\\needle-log\\needle-log.ps1"
+  "needleLog": "C:\\Users\\you\\tools\\needle-log\\needle-log.ps1",
+  "backupDir": "C:\\Users\\you\\ai-hub\\backups\\corvoid",
+  "autoBackup": "daily",
+  "keepBackups": 10
 }
 ```
 
@@ -71,8 +81,15 @@ The app reads one JSON file, the first one it finds:
 |---|---|---|
 | `hub` | Your rules (`AGENTS.md`), `skills\`, `packs\`, `apps.yaml`, `categories.yaml`, `glossary.yaml`, `locks.yaml` | `%USERPROFILE%\ai-hub` |
 | `vault` | Obsidian vault with `Projects\<Name>\<Name>.md` and `Log\YYYY-MM-DD.md` | `%USERPROFILE%\Documents\Vortex` |
+| `claudeSkills` | Claude Code skill folder | `%USERPROFILE%\.claude\skills` |
+| `antigravitySkills` | Antigravity skill folder | `%USERPROFILE%\.gemini\config\skills` |
+| `opencodeConfig` | OpenCode config folder (`opencode.json` / `.jsonc`) | `%USERPROFILE%\.config\opencode` |
+| `antigravityExe` | Antigravity's `Antigravity.exe`, used for its icon | the installed app, if any |
 | `vlog`, `needleLog` | Optional scripts for quick log | off |
 | `logDir` | The app's own logs | `<hub>\.logs` |
+| `backupDir` | Where backups (`corvoid-backup-*.zip`) are written and listed | `<hub>\backups\corvoid` |
+| `autoBackup` | `daily`, `weekly` or `off`: a backup on app start when the newest one is older | `daily` |
+| `keepBackups` | How many backups stay; older ones are pruned | `10` |
 
 ## How it works
 
@@ -87,7 +104,7 @@ hub/                         vault/ (Obsidian)
 - Each harness points at the same `AGENTS.md`, so they all follow one set of rules.
 - Agents log finished work as one line in today's note. The app reads those lines to draw progress, activity and the graph.
 - Hub skills are synced to each harness by `hub-sync.ps1` (for example with [skillshare](https://github.com/runkids/skillshare)).
-- The app only reads and writes inside your hub, your vault and the harness skill folders.
+- The app only reads and writes inside your hub, your vault and the harness skill folders. Setup also writes `corvoid-hub.json` and the rules hook of a harness you pick, backing up every file it edits.
 
 ## Build from source
 

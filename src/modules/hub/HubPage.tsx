@@ -1,8 +1,9 @@
 import { useState } from "react"
-import { Plus, RefreshCw, Save, Undo2, Play, Trash2 } from "lucide-react"
+import { ArchiveRestore, Plus, RefreshCw, Save, Settings2, Undo2, Play, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageToolbar } from "@/components/page-toolbar"
+import { openSetup } from "@/components/setup-dialog"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -28,6 +29,7 @@ import {
 
 import { CategoriesPanel } from "./CategoriesPanel"
 import { LocksPanel } from "./LocksPanel"
+import { BackupsPanel } from "./BackupsPanel"
 
 export function HubPage() {
   const [tab, setTab] = useState("rules")
@@ -60,6 +62,10 @@ export function HubPage() {
           <RefreshCw />
           Refresh
         </Button>
+        <Button variant="outline" size="sm" onClick={openSetup}>
+          <Settings2 />
+          Setup
+        </Button>
         <Button size="sm" onClick={syncNow} disabled={syncing}>
           <Play />
           {syncing ? "Syncing..." : "Sync now"}
@@ -72,6 +78,10 @@ export function HubPage() {
           <TabsTrigger value="packs">Packs</TabsTrigger>
           <TabsTrigger value="categories">Categories</TabsTrigger>
           <TabsTrigger value="locks">Locks</TabsTrigger>
+          <TabsTrigger value="backups">
+            <ArchiveRestore />
+            Backups
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="rules" className="pt-4">
           <RulesPanel key={`rules-${refreshKey}`} />
@@ -84,6 +94,9 @@ export function HubPage() {
         </TabsContent>
         <TabsContent value="locks" className="pt-4">
           <LocksPanel key={`locks-${refreshKey}`} />
+        </TabsContent>
+        <TabsContent value="backups" className="pt-4">
+          <BackupsPanel key={`backups-${refreshKey}`} />
         </TabsContent>
       </Tabs>
 

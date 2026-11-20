@@ -1,7 +1,14 @@
 {
   "hub": "C:\\Users\\you\\ai-hub",
   "vault": "C:\\Users\\you\\Documents\\Vortex",
+  "claudeSkills": "C:\\Users\\you\\.claude\\skills",
+  "antigravitySkills": "C:\\Users\\you\\.gemini\\config\\skills",
+  "opencodeConfig": "C:\\Users\\you\\.config\\opencode",
+  "antigravityExe": "C:\\Users\\you\\AppData\\Local\\Programs\\antigravity\\Antigravity.exe",
   "vlog": "C:\\Users\\you\\tools\\vlog\\vlog.ps1",
   "needleLog": "C:\\Users\\you\\tools\\needle-log\\needle-log.ps1",
-  "logDir": "C:\\Users\\you\\ai-hub\\.logs"
+  "logDir": "C:\\Users\\you\\ai-hub\\.logs",
+  "backupDir": "C:\\Users\\you\\ai-hub\\backups\\corvoid",
+  "autoBackup": "daily",
+  "keepBackups": 10
 }

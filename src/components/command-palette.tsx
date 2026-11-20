@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react"
-import { AppWindow, FolderKanban, Sparkles } from "lucide-react"
+import { AppWindow, ArchiveRestore, FolderKanban, Settings2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
 import { HarnessIcon } from "@/components/harness-icon"
 import { HubMarkIcon } from "@/components/hub-mark"
+import { openSetup } from "@/components/setup-dialog"
 import { TermIcon } from "@/components/term-icon"
 import {
   Command,
@@ -15,6 +16,7 @@ import {
   CommandList,
 } from "@/components/ui/command"
 import { loadApps, type AppEntry } from "@/core/apps"
+import { backupNow } from "@/core/backup"
 import { cfg } from "@/core/config"
 import { errorMessage } from "@/core/errors"
 import { loadGlossary, type GlossaryTerm } from "@/core/glossary"
@@ -148,6 +150,31 @@ export function CommandPalette() {
                 {m.title}
               </CommandItem>
             ))}
+          </CommandGroup>
+
+          <CommandGroup heading="App">
+            <CommandItem
+              value="app:setup"
+              keywords={["setup", "paths", "config", "hub folder", "vault"]}
+              onSelect={() => {
+                setOpen(false)
+                openSetup()
+              }}
+            >
+              <Settings2 className="size-3.5 text-muted-foreground" />
+              Setup
+            </CommandItem>
+            <CommandItem
+              value="app:backup"
+              keywords={["backup", "archive", "zip", "snapshot", "save"]}
+              onSelect={() => {
+                setOpen(false)
+                void backupNow()
+              }}
+            >
+              <ArchiveRestore className="size-3.5 text-muted-foreground" />
+              Back up now
+            </CommandItem>
           </CommandGroup>
 
           {data && data.projects.length > 0 && (

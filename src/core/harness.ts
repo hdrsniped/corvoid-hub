@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core"
+
 /** The AI harnesses that write log entries. */
 export type AiHarnessId = "claude-code" | "antigravity" | "opencode"
 
@@ -31,4 +33,18 @@ export function harnessOf(raw: string | undefined): HarnessId | null {
   if (s.includes("antigravity")) return "antigravity"
   if (s.includes("opencode")) return "opencode"
   return "other"
+}
+
+let antigravityIcon: Promise<string | null> | null = null
+
+/**
+ * The app icon of the installed Antigravity, read out of its exe by Rust and cached in the app's
+ * icon folder. Null when Antigravity is not installed, so the caller can fall back to a plain glyph.
+ * The app ships no Antigravity logo of its own.
+ */
+export function antigravityAppIcon(): Promise<string | null> {
+  antigravityIcon ??= invoke<string | null>("harness_icon", { name: "antigravity" }).catch(
+    () => null
+  )
+  return antigravityIcon
 }

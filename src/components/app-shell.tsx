@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Moon, Search, Sun } from "lucide-react"
 
 import {
@@ -7,6 +7,7 @@ import {
 } from "@/components/command-palette"
 import { useTheme } from "@/components/theme-provider"
 import { RootMissing } from "@/components/root-missing"
+import { SetupDialog } from "@/components/setup-dialog"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -24,7 +25,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { ToolbarSlotContext } from "@/components/page-toolbar"
-import { cfg } from "@/core/config"
+import { cfg, onConfigChange } from "@/core/config"
 import { useRoute } from "@/core/navigation"
 import { findModuleByRoute, modules } from "@/modules/registry"
 
@@ -37,6 +38,10 @@ export function AppShell() {
   const missing = active.needs === "hub" ? !cfg().hubExists : !cfg().vaultExists
   // Pages portal their actions (Refresh, New project...) into this slot of the top bar.
   const [toolbarSlot, setToolbarSlot] = useState<HTMLDivElement | null>(null)
+  // Setup changes the roots, so the open screen remounts and loads from the new folders.
+  const [configVersion, setConfigVersion] = useState(0)
+
+  useEffect(() => onConfigChange(() => setConfigVersion((v) => v + 1)), [])
 
   const isDark =
     theme === "dark" ||
@@ -102,11 +107,16 @@ export function AppShell() {
         </header>
         <div className="app-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
           <ToolbarSlotContext.Provider value={toolbarSlot}>
-            {missing ? <RootMissing root={active.needs} /> : <ActivePage />}
+            {missing ? (
+              <RootMissing key={configVersion} root={active.needs} />
+            ) : (
+              <ActivePage key={`${active.id}-${configVersion}`} />
+            )}
           </ToolbarSlotContext.Provider>
         </div>
       </SidebarInset>
       <CommandPalette />
+      <SetupDialog />
     </SidebarProvider>
   )
 }

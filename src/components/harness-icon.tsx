@@ -1,6 +1,6 @@
+import { useEffect, useState } from "react"
+import { Orbit } from "lucide-react"
 import { siClaudecode, siOpencode, type SimpleIcon } from "simple-icons"
-
-import antigravityLogo from "@/assets/antigravity.png"
 
 import { HubMark } from "@/components/hub-mark"
 import {
@@ -11,15 +11,52 @@ import {
 } from "@/components/ui/tooltip"
 import { harnessColor, useDark } from "@/core/colors"
 import { cx } from "@/core/format"
-import { HARNESS_LABEL, harnessOf, type HarnessId } from "@/core/harness"
+import {
+  HARNESS_LABEL,
+  antigravityAppIcon,
+  harnessOf,
+  type HarnessId,
+} from "@/core/harness"
 
-/** Brand glyphs from the simple-icons package. Antigravity has none there, so it gets its own mark. */
+/** Brand glyphs from the simple-icons package. Antigravity has none there, so it uses its own app icon. */
 const BRAND: Partial<Record<HarnessId, SimpleIcon>> = {
   "claude-code": siClaudecode,
   opencode: siOpencode,
 }
 
 const GLYPH = "size-3.5 shrink-0"
+
+/**
+ * Antigravity: the icon of the installed app (read from its exe by Rust, cached for the session),
+ * otherwise a neutral orbit glyph in the brand hue. The app never ships Google's logo itself.
+ */
+function AntigravityGlyph({ className }: { className?: string }) {
+  const dark = useDark()
+  const [icon, setIcon] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    antigravityAppIcon().then((src) => {
+      if (alive) setIcon(src)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  if (icon) {
+    return (
+      <img src={icon} alt="" className={cx(className, "rounded-[2px] object-contain")} draggable={false} />
+    )
+  }
+  return (
+    <Orbit
+      aria-hidden="true"
+      className={className}
+      style={{ color: harnessColor("antigravity", dark) }}
+    />
+  )
+}
 
 /**
  * The bare brand glyph of a harness, in its brand color. `me` is the app mark, an unknown harness
@@ -53,10 +90,7 @@ export function HarnessGlyph({
     )
   }
   if (id === "antigravity") {
-    // Antigravity's own app icon (from its installed app.asar), full color.
-    return (
-      <img src={antigravityLogo} alt="" className={cls} draggable={false} />
-    )
+    return <AntigravityGlyph className={cls} />
   }
   return (
     <span
